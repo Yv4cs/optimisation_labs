@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+
+# smoke runs are plumbing checks, not results
+results/smoke/
+# server logs can be large; keep them on the box, not in git
+results/raw/**/*.log
+
+dashboard/node_modules/
+dashboard/dist/
