@@ -1,0 +1,22 @@
+# M1 baseline: one T4, FP16, no prefix caching, realistic chat prompts.
+name: t4-qwen2.5-3b-fp16-vllm
+milestone: M1
+runtime: vllm
+model: Qwen/Qwen2.5-3B-Instruct
+precision: fp16  # T4 has no BF16 support
+tp: 1
+dp: 1
+max_model_len: 4096
+prefix_caching: false
+interconnect: PCIe
+pod_hourly_usd: 0.0
+
+concurrency: [1, 2, 4, 8, 16, 32, 64, 128, 256]
+dataset:
+  kind: sharegpt
+  output_len: 256
+min_requests: 32
+requests_per_slot: 4
+warmup_requests: 16
+repeats: 3
+max_cv: 0.05
