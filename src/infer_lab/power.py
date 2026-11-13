@@ -92,10 +92,19 @@ class GpuSampler:
 
 
 def energy_joules(samples: Sequence[Sample]) -> float:
-    """TODO(you): total energy in joules across all GPUs.
+    """Total energy in joules across all GPUs.
 
     Power is a rate (W = J/s); energy is the area under the power-vs-time curve.
     Integrate each GPU separately (sort by time, trapezoid rule), then sum the GPUs.
     A GPU with fewer than two samples contributes 0.
     """
-    raise NotImplementedError
+    by_gpu: dict[int, list[Sample]] = defaultdict(list)
+    for s in samples:
+        by_gpu[s.gpu].append(s)
+
+    total = 0.0
+    for gpu_samples in by_gpu.values():
+        gpu_samples.sort(key=lambda s: s.t_s)
+        for a, b in zip(gpu_samples, gpu_samples[1:]):
+            total += (a.power_w + b.power_w) / 2 * (b.t_s - a.t_s)
+    return total
