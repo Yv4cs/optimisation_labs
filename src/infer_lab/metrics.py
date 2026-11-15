@@ -1,10 +1,9 @@
-"""Turn per-request timings into the latency and throughput numbers we report.
-
-YOU write the functions below; tests/test_metrics.py defines what "correct" means.
-"""
+"""Turn per-request timings into the latency and throughput numbers we report."""
 
 from __future__ import annotations
 
+import math
+import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -26,36 +25,60 @@ class Summary:
 
 
 def ttft_ms(r: RequestResult) -> float:
-    """TODO(you): time from sending the request to its first streamed chunk, in ms."""
-    raise NotImplementedError
+    """Time from sending the request to its first streamed chunk, in ms."""
+    return (r.chunk_times_s[0] - r.start_s) * 1000
 
 
 def itl_ms(r: RequestResult) -> list[float]:
-    """TODO(you): gaps between consecutive chunks in ms (n chunks -> n-1 gaps).
+    """Gaps between consecutive chunks in ms (n chunks -> n-1 gaps).
 
     If a runtime packs several tokens into one chunk this is per-chunk, not per-token (DECISIONS D-008).
     """
-    raise NotImplementedError
+    t = r.chunk_times_s
+    return [(b - a) * 1000 for a, b in zip(t, t[1:])]
 
 
 def percentile(values: Sequence[float], p: float) -> float:
-    """TODO(you): p in [0, 100], linear interpolation between closest ranks (numpy's default)."""
-    raise NotImplementedError
+    """p in [0, 100], linear interpolation between closest ranks (numpy's default)."""
+    xs = sorted(values)
+    rank = (len(xs) - 1) * p / 100  # fractional index into the sorted list
+    lo = math.floor(rank)
+    hi = min(lo + 1, len(xs) - 1)
+    return xs[lo] + (xs[hi] - xs[lo]) * (rank - lo)
 
 
 def cv(values: Sequence[float]) -> float:
-    """TODO(you): coefficient of variation = sample std (ddof=1) / mean.
+    """Coefficient of variation = sample std (ddof=1) / mean.
 
     The runner re-runs a concurrency level when the repeats' tokens/s CV exceeds 5%.
     """
-    raise NotImplementedError
+    return statistics.stdev(values) / statistics.fmean(values)
 
 
 def summarize(results: Sequence[RequestResult], wall_time_s: float) -> Summary:
-    """TODO(you): aggregate one load run.
+    """Aggregate one load run.
 
     - latency stats use successful requests only; ITL p50 pools the gaps of all of them
     - tokens_per_s = successful output tokens / wall_time_s; req_per_s = successful requests / wall_time_s
     - with zero successful requests, every metric is None ("not measured")
     """
-    raise NotImplementedError
+    ok = [r for r in results if r.ok]
+    num_failed = len(results) - len(ok)
+    if not ok:
+        return Summary(0, num_failed, 0, None, None, None, None, None, None, None)
+
+    output_tokens = sum(r.output_tokens for r in ok)
+    ttfts = [ttft_ms(r) for r in ok]
+    gaps = [g for r in ok for g in itl_ms(r)]
+    return Summary(
+        num_ok=len(ok),
+        num_failed=num_failed,
+        output_tokens=output_tokens,
+        mean_prompt_tokens=statistics.fmean(r.prompt_tokens for r in ok),
+        mean_output_tokens=output_tokens / len(ok),
+        ttft_p50_ms=percentile(ttfts, 50),
+        ttft_p99_ms=percentile(ttfts, 99),
+        itl_p50_ms=percentile(gaps, 50) if gaps else None,
+        tokens_per_s=output_tokens / wall_time_s,
+        req_per_s=len(ok) / wall_time_s,
+    )

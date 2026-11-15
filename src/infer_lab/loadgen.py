@@ -1,10 +1,10 @@
-"""Async load generator: N simulated users streaming completions from an OpenAI-compatible server.
-
-YOU write send_request and run_load. tests/ and runner.py rely only on the signatures below.
-"""
+"""Async load generator: N simulated users streaming completions from an OpenAI-compatible server."""
 
 from __future__ import annotations
 
+import asyncio
+import json
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -35,25 +35,52 @@ async def send_request(
     max_tokens: int,
     request_id: int,
 ) -> RequestResult:
-    """TODO(you): send one streaming completion request and time it.
-
-    POST {base_url}/v1/completions with JSON:
-        {"model": model, "prompt": prompt.text, "max_tokens": max_tokens, "temperature": 0,
-         "stream": True, "ignore_eos": True, "stream_options": {"include_usage": True}}
+    """Send one streaming completion request and time it. Never raises: failures go in `error`.
 
     The reply is Server-Sent Events: lines like `data: {...json...}`, ending with `data: [DONE]`.
-
-    Record:
-    - start_s right before sending
-    - one entry in chunk_times_s for every chunk whose choices[0]["text"] is non-empty
-    - output_tokens from the final usage chunk (usage.completion_tokens), the server's own count
-    - end_s when the stream finishes
-    - on a non-200 status or any exception: set `error` to a short message, never raise
-
-    Hints: `async with client.stream("POST", url, json=body) as resp:` and
-    `async for line in resp.aiter_lines():`
+    A chunk counts towards chunk_times_s only if it carries text; output_tokens is the server's own
+    count from the final usage chunk.
     """
-    raise NotImplementedError
+    result = RequestResult(request_id=request_id, prompt_tokens=prompt.prompt_tokens)
+    body = {
+        "model": model,
+        "prompt": prompt.text,
+        "max_tokens": max_tokens,
+        "temperature": 0,
+        "stream": True,
+        "ignore_eos": True,
+        "stream_options": {"include_usage": True},
+    }
+    result.start_s = time.perf_counter()
+    try:
+        async with client.stream("POST", f"{base_url}/v1/completions", json=body) as resp:
+            if resp.status_code != 200:
+                await resp.aread()
+                result.error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                return result
+            async for line in resp.aiter_lines():
+                now = time.perf_counter()  # read the clock before parsing, so JSON work is not timed
+                if not line.startswith("data:"):
+                    continue  # blank separator lines between events
+                data = line[len("data:") :].strip()
+                if data == "[DONE]":
+                    break
+                chunk = json.loads(data)
+                choices = chunk.get("choices") or []
+                if choices and choices[0].get("text"):
+                    result.chunk_times_s.append(now)
+                if chunk.get("usage"):
+                    result.output_tokens = chunk["usage"]["completion_tokens"]
+        # Without these the request cannot be measured; counting it as a success would skew the numbers.
+        if not result.chunk_times_s:
+            result.error = "stream ended without any text"
+        elif result.output_tokens == 0:
+            result.error = "stream ended without a usage chunk"
+    except Exception as e:
+        result.error = f"{type(e).__name__}: {e}"[:200]
+    finally:
+        result.end_s = time.perf_counter()
+    return result
 
 
 async def run_load(
@@ -63,14 +90,25 @@ async def run_load(
     concurrency: int,
     max_tokens: int,
 ) -> tuple[list[RequestResult], float]:
-    """TODO(you): send every prompt with at most `concurrency` requests in flight.
+    """Send every prompt with at most `concurrency` requests in flight; return (results, wall_time_s).
 
-    Returns (results, wall_time_s).
-    - one httpx.AsyncClient for the whole run (timeout=None, connection limits above `concurrency`)
-    - asyncio.Semaphore(concurrency) caps in-flight requests
-    - spread requests round-robin over base_urls (one URL per data-parallel replica)
-    - wall_time_s: from just before the first request is sent until the last one finishes
-
-    Think: why does a semaphore model "N users" better than sending all requests at once?
+    The semaphore models N users who each send their next request as soon as the previous one
+    finishes, so the server sees a steady N in flight instead of one burst of len(prompts).
+    Requests go round-robin over base_urls (one URL per data-parallel replica).
     """
-    raise NotImplementedError
+    semaphore = asyncio.Semaphore(concurrency)
+    # More connections than in-flight requests, so no request ever waits for a free connection.
+    limits = httpx.Limits(max_connections=concurrency + 16, max_keepalive_connections=concurrency + 16)
+
+    async with httpx.AsyncClient(timeout=None, limits=limits) as client:
+
+        async def one_user_turn(i: int, prompt: Prompt) -> RequestResult:
+            async with semaphore:
+                url = base_urls[i % len(base_urls)]
+                return await send_request(client, url, model, prompt, max_tokens, i)
+
+        t0 = time.perf_counter()
+        results = await asyncio.gather(*(one_user_turn(i, p) for i, p in enumerate(prompts)))
+        wall_time_s = time.perf_counter() - t0
+
+    return list(results), wall_time_s
