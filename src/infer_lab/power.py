@@ -1,4 +1,4 @@
-"""Background NVML sampler (power, utilisation, memory) and energy integration."""
+"""Background NVML sampler (power, utilisation, memory, clocks) and energy integration."""
 
 from __future__ import annotations
 
@@ -18,6 +18,10 @@ class Sample:
     power_w: float
     util_pct: float
     mem_used_gb: float  # GB = 1e9 bytes
+    # Clock state, because cloud GPUs throttle and the clocks cannot be locked there (STORIES S-001).
+    sm_clock_mhz: float = 0.0
+    temp_c: float = 0.0
+    clock_event_reasons: int = 0  # NVML bitmask, e.g. 0x4 SW power cap, 0x20 SW thermal, 0x40 HW thermal
 
 
 class GpuSampler:
@@ -36,6 +40,10 @@ class GpuSampler:
         self._nvml = pynvml
         pynvml.nvmlInit()
         self._handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in self.gpu_indices]
+        # Renamed from "throttle reasons" in newer NVML; use whichever this version provides.
+        self._clock_reasons = getattr(pynvml, "nvmlDeviceGetCurrentClocksEventReasons", None) or getattr(
+            pynvml, "nvmlDeviceGetCurrentClocksThrottleReasons"
+        )
         self._start_mj = self._total_energy_mj()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -61,6 +69,9 @@ class GpuSampler:
                         power_w=nvml.nvmlDeviceGetPowerUsage(h) / 1000,
                         util_pct=float(nvml.nvmlDeviceGetUtilizationRates(h).gpu),
                         mem_used_gb=nvml.nvmlDeviceGetMemoryInfo(h).used / 1e9,
+                        sm_clock_mhz=float(nvml.nvmlDeviceGetClockInfo(h, nvml.NVML_CLOCK_SM)),
+                        temp_c=float(nvml.nvmlDeviceGetTemperature(h, nvml.NVML_TEMPERATURE_GPU)),
+                        clock_event_reasons=int(self._clock_reasons(h)),
                     )
                 )
             self._stop.wait(self.interval_s)
