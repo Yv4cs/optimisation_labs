@@ -35,3 +35,4 @@ On Kaggle, `notebooks/kaggle_driver.ipynb` runs the same make targets.
 - `results/runs.jsonl`: one validated record per measured run; `results/raw/` holds per-request and power CSVs
 - `recipes/`: best configs, packaged to reproduce
 - `DECISIONS.md`: why things are the way they are
+- `STORIES.md`: findings worth telling (surprise, evidence, reasoning, outcome)

@@ -49,6 +49,8 @@ energy counter, and both values go in `env.json`. NVML power readings are averag
 short window, so very short runs are less accurate. `vram_gb` is peak usage *including* the runtime's
 up-front KV-cache reservation (vLLM pre-allocates most of the memory), so it is not "memory the model
 needs".
+Each sample also records the SM clock, temperature and NVML's clock-event (throttle) reasons. Kaggle does
+not allow locking clocks (`nvidia-smi -lgc` is refused), so the clock state is recorded instead of fixed.
 
 ## D-010 AWQ kernel selection
 For `awq-int4` we pass only `--dtype float16` and let the runtime read the checkpoint's quantization
