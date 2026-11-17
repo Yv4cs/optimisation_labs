@@ -1,4 +1,4 @@
 # Kaggle runtime (2x T4). Kaggle cannot run Docker, so reproducibility comes from a lock file:
 #   1. `make setup` installs these, 2. verify vLLM serves on T4, 3. `make freeze` writes env/lock-kaggle.txt.
 # Pin vllm here to the exact version that passed step 2; the lock file records everything else.
-vllm
+vllm==0.33.0  # verified on Kaggle T4 2026-11-16 (STORIES S-005)
