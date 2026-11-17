@@ -32,7 +32,7 @@ class Experiment(BaseModel):
 
     name: str
     milestone: str
-    runtime: Literal["vllm", "sglang"]
+    runtime: Literal["vllm", "sglang", "trtllm"]
     model: str
     precision: Precision
     tp: int = Field(default=1, ge=1)

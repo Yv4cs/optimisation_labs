@@ -1,0 +1,23 @@
+# M4 / TN4: engine comparison on 1x H100. sglang, bf16: official BF16 weights.
+# Same workload as TN1 so the curve shapes are comparable. Fill pod_hourly_usd and interconnect on the pod.
+name: h100-qwen3-8b-sglang-bf16
+milestone: M4
+runtime: sglang
+model: Qwen/Qwen3-8B
+precision: bf16
+tp: 1
+dp: 1
+max_model_len: 4096
+prefix_caching: false
+interconnect: SXM  # H100 SXM5; change to PCIe if the pod is an H100 PCIe
+pod_hourly_usd: 0.0  # TODO on the pod: the hourly price shown by RunPod
+
+concurrency: [1, 16, 64, 256]
+dataset:
+  kind: sharegpt
+  output_len: 256
+min_requests: 32
+requests_per_slot: 4
+warmup_requests: 16
+repeats: 3
+max_cv: 0.05

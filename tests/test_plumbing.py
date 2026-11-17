@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from infer_lab.config import load_experiment
 from infer_lab.schema import RunRecord, append_run, load_runs
-from infer_lab.server import ServerGroup, build_command
+from infer_lab.server import ServerGroup, build_command, trtllm_options
 
 EXAMPLE = Path(__file__).parent.parent / "configs/experiments/t4_qwen3b_fp16.yaml"
 
@@ -70,6 +70,27 @@ def test_sglang_command_maps_flags():
     assert "--disable-radix-cache" in cmd
     assert cmd[cmd.index("--tp-size") + 1] == "2"
     assert cmd[cmd.index("--max-running-requests") + 1] == "64"
+
+
+def test_trtllm_command_and_options():
+    exp = load_experiment(EXAMPLE.parent / "h100_qwen3-8b_trtllm_fp8.yaml").model_copy(update={"max_num_seqs": 64})
+    cmd = build_command(exp, 8000, Path("opts.yaml"))
+    assert cmd[:3] == ["trtllm-serve", "serve", "nvidia/Qwen3-8B-FP8"]
+    assert cmd[cmd.index("--extra_llm_api_options") + 1] == "opts.yaml"
+    assert cmd[cmd.index("--max_batch_size") + 1] == "64"
+    assert trtllm_options(exp) == {"kv_cache_config": {"enable_block_reuse": False, "dtype": "fp8"}}
+    bf16 = exp.model_copy(update={"precision": "bf16", "prefix_caching": True})
+    assert trtllm_options(bf16) == {"kv_cache_config": {"enable_block_reuse": True}}
+    with pytest.raises(ValueError):
+        trtllm_options(exp.model_copy(update={"precision": "fp16"}))
+
+
+@pytest.mark.parametrize("runtime, kv_dtype", [("vllm", "fp8"), ("sglang", "fp8_e4m3")])
+def test_fp8_reads_the_checkpoint_and_stores_kv_in_fp8(runtime, kv_dtype):
+    exp = load_experiment(EXAMPLE.parent / f"h100_qwen3-8b_{runtime}_fp8.yaml")
+    cmd = build_command(exp, 8000)
+    assert "--quantization" not in cmd
+    assert cmd[cmd.index("--kv-cache-dtype") + 1] == kv_dtype
 
 
 def test_data_parallel_gets_one_url_per_replica():

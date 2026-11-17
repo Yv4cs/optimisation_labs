@@ -1,78 +1,94 @@
 # TN4 checklist: 1× H100 on RunPod
 
-Goal: vLLM vs SGLang vs TensorRT-LLM, BF16 vs FP8, same model, same workload, same harness.
-Budget: about 3 GPU-hours, **hard cap USD 15**. Nothing is rented until the approval box at the bottom is ticked.
+Goal: compare vLLM, SGLang and TensorRT-LLM in BF16 and FP8 on the same model, workload and harness. Also run one bridge sweep that repeats TN1 on H100.
+Budget: about 3 GPU-hours, with a **hard cap of USD 15**. Nothing is rented until the approval box at the bottom is ticked.
 
-## 1. Decisions to confirm before renting
+## 1. Decisions (verified 2026-11-18)
 
-| Decision | Proposal | Why |
+| Decision | Choice | Why / evidence |
 |---|---|---|
-| Model | `Qwen/Qwen3-8B` (BF16) and the official `Qwen/Qwen3-8B-FP8` | 8B class as planned in D-002. An official FP8 checkpoint means all three engines load the *same* FP8 weights, so the comparison is about the engines, not about three different quantisation recipes. **Verify both repos exist and are ungated on Hugging Face.** Fallback: `Qwen/Qwen2.5-7B-Instruct` with on-the-fly FP8 in vLLM/SGLang only. |
-| GPU | H100 **SXM** 80 GB if available, else PCIe | SXM has ~3.35 TB/s HBM3, PCIe ~2 TB/s: a 1.7× difference that would dominate decode speed. Record which one in `interconnect`. |
-| Concurrency | `[1, 16, 64, 256]`, 3 repeats | Covers single-user latency, the knee and the plateau seen in TN1 while keeping each sweep around 10 minutes. |
-| Workload | Same as TN1: ShareGPT, 256 output tokens, `temperature=0`, `ignore_eos` | Comparable with T4 numbers (D-003). |
-| Order | vLLM → SGLang → TensorRT-LLM | Most-known first. TRT-LLM is the riskiest and goes last, time-boxed. |
+| BF16 model | `Qwen/Qwen3-8B` @ `b968826d…` | 8B class (D-002). Ungated on Hugging Face (`gated: false`). Listed in TRT-LLM 1.2.1 supported models. |
+| FP8 model | `nvidia/Qwen3-8B-FP8` @ `2cebc4c8…` | Per-tensor ModelOpt FP8, which all three engines support. Qwen's own `Qwen3-8B-FP8` is block-wise FP8, and TRT-LLM 1.2.1 does not list block FP8 for Qwen-3 (D-011). Ungated. |
+| Bridge to T4 | `Qwen/Qwen2.5-3B-Instruct` FP16, vLLM | Same model and workload as TN1, so "H100 vs T4" means something (about 10 min). |
+| GPU | H100 **SXM** 80 GB, else PCIe | SXM has ~3.35 TB/s HBM3, PCIe ~2 TB/s. Write the one you get into `interconnect` in the configs. |
+| Concurrency | `[1, 16, 64, 256]`, 3 repeats | Single user, the T4 knee, and the plateau. Keeps each sweep around 10 minutes. |
+| Workload | Same as TN1: ShareGPT, 256 output tokens, `temperature=0`, `ignore_eos` | Comparable with the T4 numbers (D-003). All three engines accept `ignore_eos` and `stream_options.include_usage` (checked in their source). |
+| Order | vLLM → SGLang → TensorRT-LLM | Most familiar first. TRT-LLM is the riskiest, so it goes last with a time box. |
 
-## 2. Before renting (free, on laptop and Kaggle)
+**Images** (all exist on their registries and were released at least two weeks ago):
 
-- [ ] Push all commits; `make test` green on the laptop.
-- [ ] Add a `trtllm` runtime to `config.py` / `server.py` (launch with `trtllm-serve`, OpenAI-compatible).
-      Check the flags against the TensorRT-LLM docs for the exact image tag chosen below. *(Claude, 18/11 morning)*
-- [ ] Decide how `fp8` maps per engine for a pre-quantised checkpoint (likely: no extra flag, the engine reads
-      the checkpoint config, as with AWQ in D-010). Update `_PRECISION_ARGS` and add a test.
-- [ ] Write the 6 configs `h100_qwen3-8b_{vllm,sglang,trtllm}_{bf16,fp8}.yaml` with `pod_hourly_usd` left as a
-      placeholder to fill on the pod.
-- [ ] Smoke the SGLang path once on Kaggle T4 (FP16, Qwen2.5-3B) if SGLang installs there, so the first SGLang
-      run is not on paid time.
-- [ ] Pick image tags and write them here (verify each exists on the registry):
-      vLLM `vllm/vllm-openai:v0.33.0` · SGLang `lmsysorg/sglang:<tag>` · TRT-LLM `nvcr.io/nvidia/tensorrt-llm/release:<tag>`.
-- [ ] Create a RunPod **network volume** (~50 GB) for the Hugging Face cache and `results/`, so weights download
-      once and results survive pod termination.
-- [ ] Check the current H100 hourly price and write it down: ______ USD/h → 3 h ≈ ______ USD.
+| Engine | Image | Released |
+|---|---|---|
+| vLLM 0.33.0 | `vllm/vllm-openai:v0.33.0` | 2026-11-02 |
+| SGLang 0.5.23 | `lmsysorg/sglang:v0.5.23` | 2026-10-30 |
+| TensorRT-LLM 1.2.1 (latest stable; 1.4 is still rc) | `nvcr.io/nvidia/tensorrt-llm/release:1.2.1` | 2026-04-20 |
 
-## 3. On each pod (one pod per engine image, same network volume)
+**Price** (RunPod, checked 2026-11-18; recheck in the console): H100 SXM costs about **USD 2.69/h on Community Cloud** and **USD 3.99/h on Secure Cloud**.
+Three hours therefore cost about **USD 8** on Community or **USD 12** on Secure.
+
+## 2. Before renting (free)
+
+- [x] Qwen3-8B, the FP8 checkpoint and the image tags verified (section 1).
+- [x] `trtllm` runtime: `trtllm-serve serve MODEL --tp_size … --extra_llm_api_options <yaml>`. The YAML carries
+      `kv_cache_config` (block reuse = prefix caching, FP8 KV). Flags were checked against the v1.2.1 source.
+- [x] FP8 mapping: no `--quantization` flag, because the engines read `quant_method: modelopt`. FP8 KV-cache is set explicitly on every engine (D-011).
+- [x] Configs: `h100_qwen3-8b_{vllm,sglang,trtllm}_{bf16,fp8}.yaml` and `h100_qwen3b_fp16_vllm.yaml`. Tests are green (44).
+- [ ] Push all commits.
+- [ ] Optional: smoke the SGLang path on Kaggle T4 (`runtime: sglang` on the TN1 config). SGLang may not support
+      sm_75 well. If it fails there, the first real SGLang run is on the H100, and that is acceptable.
+- [ ] Choose Community or Secure Cloud.
+  - RunPod network volumes are, as far as we know, **Secure Cloud only** (verify in the console).
+  - Without a volume, each pod downloads its own weights (about 16 GB BF16 and 9 GB FP8, a few minutes) and the results must be copied out before termination (section 3).
+
+## 3. On each pod (one pod per engine image)
+
+Start the pod from the engine image with a command that keeps it alive, for example `sleep infinity`, then open the web terminal.
 
 ```bash
-export HF_HOME=/workspace/hf            # on the network volume
-cd /workspace && git clone https://github.com/Yv4cs/optimisation_labs.git lab 2>/dev/null; cd lab && git pull
-pip install -e .                         # light deps only; must not replace the image's torch
-nvidia-smi && nvidia-smi topo -m         # record SXM/PCIe, driver
-make env && make test
-# fill pod_hourly_usd and interconnect in the two configs for this engine, then:
-make smoke EXP=configs/experiments/h100_qwen3-8b_<engine>_bf16.yaml
-make bench EXP=configs/experiments/h100_qwen3-8b_<engine>_bf16.yaml
-make bench EXP=configs/experiments/h100_qwen3-8b_<engine>_fp8.yaml
-pip freeze --exclude-editable > env/lock-h100-<engine>.txt
-tar czf /workspace/results_<engine>.tar.gz results env
+export HF_HOME=/workspace/hf
+cd /workspace && git clone https://github.com/Yv4cs/optimisation_labs.git lab && cd lab
+pip install -e . --no-deps && pip install pydantic pyyaml httpx nvidia-ml-py  # never touch the image's torch
+nvidia-smi && nvidia-smi topo -m          # SXM or PCIe, driver: write them down
+python -m infer_lab.env_info              # versions + GPU UUIDs
+python -m pytest -q                       # needs pytest; skip if absent
+# set interconnect and pod_hourly_usd in this engine's configs, then:
+E=vllm   # or sglang / trtllm
+make smoke EXP=configs/experiments/h100_qwen3-8b_${E}_bf16.yaml
+make bench EXP=configs/experiments/h100_qwen3-8b_${E}_bf16.yaml
+make bench EXP=configs/experiments/h100_qwen3-8b_${E}_fp8.yaml
+[ $E = vllm ] && make bench EXP=configs/experiments/h100_qwen3b_fp16_vllm.yaml   # bridge, vLLM pod only
+pip freeze --exclude-editable > env/lock-h100-${E}.txt
+tar czf /workspace/results_${E}.tar.gz results env
 ```
 
-Then **stop and terminate the pod** before starting the next engine.
+Copy `results_${E}.tar.gz` off the pod: use a network volume, or `runpodctl send` on the pod and `runpodctl receive` on the laptop.
+Check that the file arrived, **then terminate the pod** before starting the next engine.
 
 ## 4. Time plan and stop rules
 
 | Block | Budget | Stop rule |
 |---|---|---|
-| vLLM (setup, smoke, BF16, FP8) | 45 min | |
-| SGLang | 45 min | If the server is not healthy after 20 min of debugging, skip SGLang FP8 and record why. |
-| TensorRT-LLM | 60 min | **Time box: 30 min to a healthy server.** Otherwise stop, save the logs, and write the attempt up honestly in STORIES. |
-| Buffer | 30 min | |
+| vLLM: setup, smoke, BF16, FP8, 3B bridge | 55 min | |
+| SGLang: setup, smoke, BF16, FP8 | 45 min | If the server is not healthy after 20 min of debugging, skip SGLang FP8 and record why. |
+| TensorRT-LLM: setup, smoke, BF16, FP8 | 60 min | **Time box: 30 min to a healthy server.** Otherwise stop, save the logs, and write it up honestly in STORIES. |
+| Buffer | 20 min | |
 
 - Check the spend at the end of every block. At USD 12 spent, finish the current sweep and stop.
 - Never leave a pod running unattended. If a sweep runs long, terminate rather than wait idle.
-- Optional, only with time left: GSM8K accuracy check, BF16 vs FP8 (lm-evaluation-harness against the running
-  vLLM server, `--limit 250`), so "FP8 is faster" comes with "and loses X points" or "loses nothing measurable".
+- Optional, only if time is left: a GSM8K accuracy check of BF16 vs FP8 (lm-evaluation-harness against the running vLLM server, `--limit 250`).
 
-## 5. What to record (feeds STORIES and the README table)
+## 5. What to record (feeds STORIES, the README table and RECIPES R7+)
 
 - Exact image tags, `nvidia-smi` output, SXM vs PCIe, hourly price.
-- Each engine's resolved config from its server log (attention backend, CUDA graphs, chunked prefill: see S-002).
-- Clock and throttle columns in `power.csv` (H100 at 700 W behaves very differently from a 70 W T4: S-001).
+- Each engine's resolved config from its server log: attention backend, CUDA graph batch sizes, chunked prefill, KV pool size and dtype (S-002, S-003).
+- Clock and throttle columns in `power.csv`. An H100 at 700 W behaves very differently from a T4 capped at 70 W (S-001).
+- Tokens per streamed chunk for TRT-LLM (D-008). If it sends several tokens per chunk, its ITL is per chunk.
 - Anything that failed, with the log tail.
 
 ## Approval
 
-- [ ] Model choice confirmed
-- [ ] Price checked, cap USD 15 accepted
+- [ ] Model choice confirmed (Qwen3-8B BF16 + `nvidia/Qwen3-8B-FP8`, plus the 3B bridge)
+- [ ] Community or Secure Cloud chosen; price checked; cap USD 15 accepted
 - [ ] Prerequisites in section 2 done
 
 Approved by: __________ Date: __________
