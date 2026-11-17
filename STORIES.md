@@ -593,3 +593,29 @@ throughput doubled and energy per token halved, with one setting and no new hard
 
 **Animation.** The S-003 memory bar, now filled to the brim with identical blue "system prompt" blocks, one
 per user, and a queue outside; then the caching switch flips and the blue blocks collapse into one shared block.
+
+---
+
+## S-015 The official FP8 checkpoint would have made the engine comparison unfair
+
+Status: **resolved** (by choice of checkpoint) · Date: 2026-11-18 · Experiment: TN4 preparation
+
+**Context.** The plan was to compare three engines on Qwen's official `Qwen/Qwen3-8B-FP8`.
+
+**Observation.** That checkpoint's config says `quant_method: fp8`, `weight_block_size: [128, 128]`: block-wise
+FP8. TensorRT-LLM 1.2.1's quantization support matrix lists Qwen-3 with per-tensor FP8 but not block-scaling
+FP8. NVIDIA's `nvidia/Qwen3-8B-FP8` is per-tensor W8A8 (ModelOpt 0.35) and also ships FP8 KV-cache scales.
+
+**Reasoning.** If one engine cannot run a checkpoint natively, it either fails or uses a different code path,
+and the "FP8" column stops measuring the same thing across engines. A second trap: the ModelOpt checkpoint
+carries KV scales, and each engine has a different default for the KV-cache dtype.
+
+**Outcome.** All engines load `nvidia/Qwen3-8B-FP8`, with no `--quantization` flag and the KV-cache forced to FP8
+on every engine (D-011). "FP8" in the results means FP8 weights, activations and KV-cache.
+
+**Pitch.** "Before renting the H100 I checked that all three engines could load the same FP8 checkpoint. Qwen's
+own FP8 release uses block scaling, which TensorRT-LLM didn't list for Qwen-3, so I switched to NVIDIA's
+per-tensor checkpoint and pinned the KV-cache dtype on every engine. Otherwise I'd have been comparing
+quantization recipes, not engines."
+
+**Animation.** Three engine doors and two FP8 "keys": the block-scaled key fits two doors, the per-tensor key fits all three.
