@@ -14,15 +14,16 @@ Precision = Literal["fp16", "bf16", "fp8", "awq-int4"]
 class DatasetSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["sharegpt", "long_context"]
-    input_len: int | None = None  # long_context only: prompt length in tokens
+    kind: Literal["sharegpt", "long_context", "shared_prefix"]
+    # long_context: prompt length in tokens; shared_prefix: length of the prefix every request shares
+    input_len: int | None = None
     output_len: int = 256  # every request generates exactly this many tokens (ignore_eos)
     seed: int = 0
 
     @model_validator(mode="after")
-    def _long_context_needs_length(self) -> DatasetSpec:
-        if self.kind == "long_context" and self.input_len is None:
-            raise ValueError("dataset.input_len is required for kind=long_context")
+    def _length_given_when_needed(self) -> DatasetSpec:
+        if self.kind != "sharegpt" and self.input_len is None:
+            raise ValueError(f"dataset.input_len is required for kind={self.kind}")
         return self
 
 
@@ -65,6 +66,10 @@ class Experiment(BaseModel):
             out.append(f"max_num_seqs={self.max_num_seqs}")
         if self.dataset.kind == "long_context":
             out.append(f"long_context={self.dataset.input_len}")
+        if self.dataset.kind == "shared_prefix":
+            out.append(f"shared_prefix={self.dataset.input_len}")
+        if self.extra_server_args:
+            out.append("args=" + " ".join(self.extra_server_args))
         return out
 
     def num_requests(self, concurrency: int) -> int:

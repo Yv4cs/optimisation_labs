@@ -75,3 +75,19 @@ def test_sglang_command_maps_flags():
 def test_data_parallel_gets_one_url_per_replica():
     exp = load_experiment(EXAMPLE).model_copy(update={"dp": 2})
     assert ServerGroup(exp, Path("unused")).urls == ["http://127.0.0.1:8000", "http://127.0.0.1:8001"]
+
+
+def test_shared_prefix_needs_a_length_and_is_tagged():
+    exp = load_experiment(EXAMPLE)
+    with pytest.raises(ValidationError):
+        exp.dataset.model_validate({"kind": "shared_prefix"})
+    spec = exp.dataset.model_validate({"kind": "shared_prefix", "input_len": 1024})
+    assert "shared_prefix=1024" in exp.model_copy(update={"dataset": spec}).features()
+
+
+@pytest.mark.parametrize("path", sorted(EXAMPLE.parent.glob("*.yaml")), ids=lambda p: p.name)
+def test_every_experiment_config_loads_and_builds(path):
+    exp = load_experiment(path)
+    cmd = build_command(exp, exp.port)
+    assert exp.model in cmd
+    assert ServerGroup(exp, Path("unused")).urls[0].endswith(str(exp.port))

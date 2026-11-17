@@ -1,0 +1,25 @@
+# TN3: 2x T4 over PCIe, two independent copies, one per GPU, requests round-robin.
+# Same total GPUs and same concurrency (total across replicas) for both layouts; compare with TN1 (1x T4).
+# Expectation ("less is more"): the 3B model fits on one T4, so replicas avoid all-reduce and should win on
+# throughput; TP=2 may win single-user ITL because each GPU reads half the weights, if PCIe all-reduce is cheap.
+name: t4x2-qwen2.5-3b-fp16-vllm-dp2
+milestone: M3
+runtime: vllm
+model: Qwen/Qwen2.5-3B-Instruct
+precision: fp16
+tp: 1
+dp: 2
+max_model_len: 4096
+prefix_caching: false
+interconnect: PCIe
+pod_hourly_usd: 0.0
+
+concurrency: [1, 4, 16, 64, 256]
+dataset:
+  kind: sharegpt
+  output_len: 256
+min_requests: 32
+requests_per_slot: 4
+warmup_requests: 16
+repeats: 3
+max_cv: 0.05
