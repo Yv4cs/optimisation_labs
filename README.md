@@ -34,6 +34,6 @@ On Kaggle, `notebooks/kaggle_driver.ipynb` runs the same make targets.
 - `src/infer_lab/`: server launcher, load generator, metrics, NVML power sampler, run schema
 - `configs/experiments/`: one YAML file per experiment
 - `results/runs.jsonl`: one validated record per measured run; `results/raw/` holds per-request and power CSVs
-- `recipes/`: best configs, packaged to reproduce
+- `RECIPES.md`: which config to run for which goal, with the exact command and measured numbers
 - `DECISIONS.md`: why things are the way they are
 - `STORIES.md`: findings worth telling (surprise, evidence, reasoning, outcome)
