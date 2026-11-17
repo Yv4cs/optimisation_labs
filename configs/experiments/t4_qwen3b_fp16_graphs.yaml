@@ -1,0 +1,23 @@
+# STORIES S-007 control: the eager config with CUDA graphs and compile left on (the TN1 setting).
+# Run it in the same Kaggle session as the eager config, so both land on the same physical GPU.
+name: t4-qwen2.5-3b-fp16-vllm-graphs
+milestone: M1
+runtime: vllm
+model: Qwen/Qwen2.5-3B-Instruct
+precision: fp16
+tp: 1
+dp: 1
+max_model_len: 4096
+prefix_caching: false
+interconnect: PCIe
+pod_hourly_usd: 0.0
+
+concurrency: [1, 2]
+dataset:
+  kind: sharegpt
+  output_len: 256
+min_requests: 16  # a diagnostic, not a headline number: 2 repeats x 16 requests is enough to see a 40% ITL gap
+requests_per_slot: 4
+warmup_requests: 16
+repeats: 2
+max_cv: 0.05

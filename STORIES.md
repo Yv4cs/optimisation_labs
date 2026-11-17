@@ -66,8 +66,15 @@ efficiently. At batch 1 the GPU is busy waiting on memory.
   18.6 tok/s (CV 4.2%), ITL p50 51–52 ms, power 65.3–65.5 W. Average power stayed at 64–66 W at every
   concurrency from 1 to 256, i.e. the card sat just under its 70 W cap the whole time. The 13.1 tok/s smoke
   run now looks like the outlier, and the run-to-run noise in TN1 is mostly workload, not hardware (S-010).
-- Next: one smoke run with the new sampler (commit 28186be) to see the clock and throttle reasons at the
-  power cap.
+- 2026-11-17, the TN2/TN3 runs with the new sampler (143,223 samples over 5 experiments): the NVML reason
+  bitmask is **4 (SW power cap) in 136,205 samples and 0 in the other 7,018**. No thermal-slowdown bit ever
+  appears, although the cards reach 81 °C. The SM clock under load ranges from **390 MHz to 1,335 MHz**
+  depending on the kernels running, while power stays at 66–67 W. So the T4 is not overheating: it is
+  pinned at its 70 W budget, and the clock it can afford depends on how power-hungry the current work is.
+  This is why the same work can run at different speeds (S-007, S-013).
+
+Status update: **confirmed** (power cap, not thermal). Kept for the pitch: you cannot lock clocks on Kaggle,
+so record them.
 
 **Pitch.** "My first smoke test gave 13 tokens/s where the roofline said about 50, and a second identical run
 gave 19. I cross-checked against vLLM's own counters to rule out my client, then saw throughput drifting
@@ -137,6 +144,11 @@ GQA matters: with 2 KV heads instead of 16, the cache is 8× smaller than full m
 
 **Outcome.** "45x" is the worst case (every request 4096 tokens). ShareGPT prompts are much shorter, so the
 point where requests start queueing should be well above c=45. TN1's sweep will show where it is.
+
+**Correction (2026-11-17).** The pool size is not a constant. Same model, same flags, different sessions:
+184,496 tokens (smoke run, DP=2 replicas), 194,160 (TN1, prefix-off), 206,560 with `--enforce-eager`
+(no memory reserved for CUDA graphs), 296,288 with AWQ (smaller weights), 557,248 with TP=2 (two cards, half
+the weights each). Always read it from the log of the run you are analysing.
 
 **Pitch.** "I sized the KV-cache by hand at about 36 KB per token, so roughly 150k tokens on a T4, and vLLM
 reported 184k. That number is what caps concurrency, which is why VRAM, not compute, is often the real limit
@@ -262,6 +274,28 @@ multiplies on Turing, the CUDA-graph / compiled path for size 1, or how the engi
 **Next.** Re-run c=1 and c=2 with `--enforce-eager` (no CUDA graphs, no compile) and compare; if the gap
 remains, profile one decode step at batch 1 vs 2.
 
+**Update 2026-11-17 (eager run + clock data; status still open, much narrower).**
+
+| Run (all FP16, batch 1 unless noted) | Session | GPU | ITL per token | SM clock |
+|---|---|---|---|---|
+| TN1, graphs, c=1 | 16 Nov | 0 | 51.9 ms (p50) | not recorded |
+| TN1, graphs, c=2 | 16 Nov | 0 | 30.9 ms (p50) | not recorded |
+| eager, c=1 | 17 Nov | 0 | **38.4 ms** (p50) | 1,170 MHz |
+| eager, c=2 | 17 Nov | 0 | **39.1 ms** (p50) | 1,320–1,335 MHz |
+| DP=2 replica 0, graphs, c=1 | 17 Nov | 0 | 41.9 / 47.1 / 47.1 ms (per-request median, 3 repeats) | 390–555 MHz |
+| DP=2 replica 1, graphs, c=1 | 17 Nov | 1 | 27.3 / 27.5 / 27.8 ms | (mixed with idle time) |
+
+- Without CUDA graphs and compile, the c=1 vs c=2 gap is gone (38.4 vs 39.1 ms). So the anomaly lives in the
+  graphs/compile path, not in the model or the scheduler.
+- On the same card in the same session, the graphs path at batch 1 ran at **390–555 MHz** while eager ran at
+  **1,170 MHz**, both at 66 W with reason "SW power cap" (S-001). Hypothesis: the captured batch-1 path keeps
+  the GPU busier per cycle (no launch gaps), so it reaches the 70 W budget at a far lower clock and ends up
+  slower per token than eager (≈ 42–47 vs 38 ms) on that card.
+- The two cards differ on their own: 27 ms vs 42–47 ms per token for identical work (S-013).
+- Missing: graphs at c=2 on the same card in the same session as eager. Config
+  `t4_qwen3b_fp16_graphs.yaml` (same as the eager config minus the flag) closes that gap; run it next to the
+  eager config in one session.
+
 **Pitch (if confirmed).** "My batch-1 numbers were slower per token than batch-2, which should be impossible
 for a memory-bound decode. It turned out to be [cause], so on this GPU single-stream latency is a kernel
 problem, not a hardware limit."
@@ -277,7 +311,7 @@ Status: **confirmed** · Date: 2026-11-17 · Experiment: TN1 (`server_0.log`)
 **Observation.** I predicted TTFT p99 would jump when the KV-cache filled up. At c=256 vLLM's log shows
 `Running: 256 reqs, Waiting: 0 reqs` with GPU KV cache usage at most **44.0%**, and 0 preemptions in the log.
 Average prompt ≈ 210–230 tokens + 256 output tokens ≈ 480 tokens × 256 users ≈ 123k tokens, under the
-184,496-token pool.
+194,160-token pool of that run (S-003 correction). S-014 is the counterpart where KV *is* the wall.
 
 **Reasoning.** With realistic (short) chat prompts the KV-cache was never the limit on one T4. The plateau
 (~790 tok/s) and the TTFT growth come from step time: at c=256 every decode step takes ~200 ms (ITL), and a
@@ -330,3 +364,168 @@ one repeat averaged 48 prompt tokens and another 450. Controlling the workload d
 as controlling the hardware."
 
 **Animation.** Three repeat "buckets" of prompts with visibly different sizes, each feeding a throughput bar.
+
+---
+
+## S-011 INT4 weights: 4× faster for one user, nothing gained at 256
+
+Status: **confirmed** (speed), quality **not measured** · Date: 2026-11-17 · Experiment: TN2a
+(`t4-qwen2.5-3b-awq-vllm`, 21 runs, same ShareGPT prompts as TN1)
+
+**Context.** Same model in its official AWQ-INT4 checkpoint (`Qwen/Qwen2.5-3B-Instruct-AWQ`), same engine and
+workload as TN1. Prediction: fewer weight bytes help when decode is memory-bound (low concurrency) and stop
+helping once it is compute-bound (high concurrency).
+
+**Observation.** Means over accepted repeats (AWQ c=16: both attempts had CV > 5%, last attempt shown).
+
+| c | AWQ tok/s | FP16 tok/s (TN1) | AWQ ITL p50 | FP16 ITL p50 | AWQ J/token | FP16 J/token |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | **74.2** | 18.9 | **12.6 ms** | 51.9 ms | **0.893** | 3.461 |
+| 4 | 208.7 | 117.0 | 14.4 ms | 32.6 ms | 0.317 | 0.563 |
+| 16 | 519.1 (unstable) | 339.3 | 21.3 ms | 39.2 ms | 0.127 | 0.194 |
+| 64 | 682.2 | 619.7 | 55.4 ms | 71.4 ms | 0.096 | 0.104 |
+| 256 | 809.9 | 792.0 | 190.9 ms | 201.6 ms | 0.081 | 0.082 |
+
+- TN1 ran in an earlier session. A same-session, same-card FP16 batch-1 reference is DP=2 replica 0 at
+  42–47 ms per token (S-007), so the fair batch-1 gain is ≈ 3.3–3.7×, still large.
+- KV pool: 296,288 tokens (FP16: 194,160), because the weights take less memory.
+- SM clock at c=1: 1,020–1,110 MHz (FP16 graphs on the same card: 390–555 MHz).
+
+**Reasoning.** At batch 1 each token reads every weight once; 4-bit weights are roughly a third of the bytes
+(embeddings and some layers stay 16-bit), so the read takes roughly a third of the time. At c=256 the step is
+dominated by compute on 256 rows, and AWQ must dequantize weights inside the kernel, so the byte saving no
+longer shows: +2% throughput, same J/token.
+
+**Outcome.** INT4 is a latency and single-user energy optimisation on this card (4× less energy per token at
+c=1), not a peak-throughput one. Accuracy cost is unknown: needs a GSM8K or similar check before recommending it.
+
+**Pitch.** "Quantising to INT4 made one user's tokens 4× faster and 4× cheaper in energy, because batch-1
+decode is just reading weights. At 256 users it gave 2%, because by then the GPU is compute-bound. So
+quantisation is a latency tool first, and I would still check accuracy before shipping it."
+
+**Follow-ups.**
+- *Why not faster at high load?* Compute-bound: the bytes saved are no longer the bottleneck, and
+  dequantisation adds work.
+- *Would FP8 on H100 behave the same?* FP8 has native tensor-core support on Hopper, so it can also speed up the
+  compute-bound regime; that is what TN4 measures.
+
+**Animation.** Two book stacks (16-bit vs 4-bit) being read by a single reader: the thin book is done 4× sooner.
+Then 256 readers crowd in and both stacks are bottlenecked at the same desk.
+
+---
+
+## S-012 Two GPUs: splitting the model beat copying it, until the very top
+
+Status: **confirmed** · Date: 2026-11-17 · Experiment: TN3 (`t4x2-…-tp2`, `t4x2-…-dp2`, 2× T4 over PCIe, same session)
+
+**Context.** Two T4s, no NVLink. TP=2 splits every layer across both cards and all-reduces activations after
+each layer. DP=2 runs two independent copies, and the load generator alternates requests between them. My
+prediction: since the 3B model fits on one card, DP wins because it never talks over PCIe.
+
+**Observation.** Means over accepted repeats:
+
+| c | TP=2 tok/s | DP=2 tok/s | TP ITL p50 | DP ITL p50 | TP J/token | DP J/token | TP W | DP W |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | **61.0** | 27.0 | **15.8 ms** | 32.4 ms | 2.191 | 3.656 | 133.7 | 98.7 |
+| 4 | **191.6** | 117.7 | 18.0 ms | 29.8 ms | 0.705 | 1.131 | 135.0 | 133.2 |
+| 16 | **549.9** | 380.6 | 23.6 ms | 34.0 ms | 0.246 | 0.347 | 135.0 | 132.3 |
+| 64 | **1,044.1** | 838.3 | 43.9 ms | 52.6 ms | 0.129 | 0.158 | 134.4 | 132.4 |
+| 256 | 1,178.5 | **1,376.0** | 145.3 ms | 114.4 ms | 0.114 | **0.095** | 134.1 | 131.0 |
+
+TTFT p99 at c=256: TP 22.1 s, DP 14.3 s (one T4 in TN1: 30.1 s). TP's KV pool is 557,248 tokens.
+
+**Reasoning.**
+- My prediction was wrong for c ≤ 64. With TP each card reads only half the weights per step, and in the
+  memory-bound regime that halves step time. The all-reduce payload is tiny (one 2,048-wide vector per user,
+  twice per layer), so even PCIe carries it cheaply at low batch.
+- At c=256 the step is compute-bound. TP pays the per-layer synchronisation on every step and each card
+  multiplies narrower matrices; DP runs two independent batches of 128 with no coordination. DP wins by 17%
+  and has lower energy per token.
+- DP scales almost perfectly: DP=2 at c ≈ 2× single-card TN1 at c/2 (e.g. 380.6 vs 2 × 195.7 at c=16), to
+  within 3–8% across sessions.
+- TP keeps both cards busy for one user (133.7 W at c=1); DP leaves the second card mostly idle (98.7 W).
+
+**Outcome.** Interactive, latency-bound serving on this hardware: TP=2. Saturated batch throughput or
+lowest J/token at full load: DP=2. The crossover is somewhere between c=64 and c=256 (not measured in between).
+On H100 with NVLink, TP's communication cost is lower still.
+
+**Pitch.** "I predicted two replicas would beat tensor parallelism because the model fits on one card and PCIe
+is slow. I was wrong up to 64 users: TP halves the weight reads per card, and the all-reduce payload is tiny,
+so single-user latency was 2× better. Only at 256 users, when the step is compute-bound, did replicas win by
+17%. The right layout depends on where your traffic sits on that curve."
+
+**Follow-ups.**
+- *Why does TP not need NVLink here?* Per token the all-reduce moves kilobytes; the cost is the number of
+  synchronisations (two per layer), not bandwidth. With bigger batches and models, bandwidth starts to matter.
+- *What would you do in production?* Mix: TP groups for latency-sensitive tiers, replicas behind a load
+  balancer for bulk traffic; pick per SLO.
+
+**Animation.** Two kitchens. TP: one recipe book torn in half, cooks shouting across a corridor after every
+step, dishes come out fast. DP: two full kitchens, each with its own queue. A slider raises the number of
+diners and the "winner" flag flips from TP to DP near the right edge.
+
+---
+
+## S-013 Two identical T4s in one box, 1.7× apart
+
+Status: **confirmed** (observation), cause **open** · Date: 2026-11-17 · Experiment: TN3 DP=2, c=1 (`requests.csv`)
+
+**Observation.** DP=2 at c=1 sends even request IDs to GPU 0 and odd ones to GPU 1. Same model, same flags,
+same session, one request at a time. Median per-request time per token over 3 repeats:
+GPU 0 **41.9 / 47.1 / 47.1 ms**, GPU 1 **27.3 / 27.5 / 27.8 ms**. GPU 0 reached 80 °C at c=1, GPU 1 73–75 °C;
+both report only the SW power-cap reason (S-001). TN1 at c=1 (also GPU 0, earlier session) shows no such
+split between even and odd requests (51–55 ms for both), which confirms the difference is the card.
+
+**Reasoning.** Same model of card, same power limit, different behaviour: silicon variation (leakage, which
+changes how much clock each watt buys) and cooling position in the chassis both fit. We cannot open the box,
+so the cause stays open.
+
+**Outcome.** Every single-GPU experiment (TN1, AWQ, eager, prefix) ran on GPU 0, the slower card. Comparisons
+within one session and one card are fair; absolute single-GPU numbers are on the pessimistic side. Record
+the GPU index and its clocks with every run (now done), and in production expect per-card spread.
+
+**Pitch.** "Two identical T4s in the same machine served the same request at 27 and 45 milliseconds per token.
+Both were power-capped at 70 W, but one bought far less clock per watt. So in a fleet, per-GPU telemetry
+matters: the same SKU is not the same performance."
+
+**Animation.** Two identical GPU icons with a power meter fixed at 70 W; one clock dial spins fast, the other
+slow, and tokens drip out at visibly different rates.
+
+---
+
+## S-014 Long shared prompts: now the KV-cache is the wall
+
+Status: **open** (prefix caching ON run pending) · Date: 2026-11-17 · Experiment: TN2b, prefix caching OFF
+(`t4-qwen2.5-3b-fp16-vllm-prefix-off`)
+
+**Context.** Every prompt starts with the same 1,024-token block (think: a long system prompt) followed by a
+ShareGPT question, so mean prompt length is 1,192–1,259 tokens. vLLM log confirms `enable_prefix_caching=False`.
+
+**Observation.**
+
+| c | tok/s | TTFT p50 | TTFT p99 | ITL p50 | J/token |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 24.1 | 540 ms | 2.3 s | 39.5 ms | 2.748 |
+| 4 (unstable) | 84.7 | 1.6 s | 4.2 s | 35.5 ms | 0.782 |
+| 16 | 171.2 | 3.4 s | 10.0 s | 54.1 ms | 0.383 |
+| 64 | 225.6 | 4.5 s | 44.2 s | 125.3 ms | 0.286 |
+| 256 | 214.9 | **152.5 s** | **244.1 s** | 257.3 ms | 0.300 |
+
+vLLM log at c=256: `Running: 125–150 reqs, Waiting: 106–128 reqs, GPU KV cache usage: 94.0–98.2%`, with prompt
+throughput 1,260–1,640 tokens/s and generation ~99 tokens/s in those windows; 0 preemptions.
+
+**Reasoning.** Pool 194,160 tokens ÷ (≈1,220 prompt + 256 output) ≈ 131 requests at full length, which
+matches the ~125–150 running. Unlike TN1 (S-008, 44% KV at c=256), half the users now wait outside the cache,
+and the GPU spends its time on prefill: each new user costs ~1,220 prompt tokens at ~1,200–1,600 tokens/s
+(the same prefill rate as S-009). Throughput peaks at c=64 and falls slightly at 256; 3.7× lower than TN1 at
+the same concurrency.
+
+**Prediction for prefix caching ON.** The shared 1,024 tokens are prefilled once and stored once, so per-user
+prefill drops to ~200 tokens and per-user KV to ~450 tokens. TTFT should fall sharply and all 256 users should fit.
+
+**Pitch (to finish).** "With a 1,000-token system prompt and caching off, 256 users meant 150-second TTFTs:
+half of them waited because the KV-cache was 98% full, and the GPU spent its time re-reading the same system
+prompt. Turning prefix caching on [result]."
+
+**Animation.** The S-003 memory bar, now filled to the brim with identical blue "system prompt" blocks, one
+per user, and a queue outside; then the caching switch flips and the blue blocks collapse into one shared block.
