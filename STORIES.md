@@ -62,7 +62,12 @@ efficiently. At batch 1 the GPU is busy waiting on memory.
   lost. Lesson: measure inside the instrument you already trust, not with a side process.
 - Fix: `GpuSampler` now records SM clock, temperature and NVML clock-event reasons every 100 ms, so every
   run's `power.csv` shows whether it was throttled and why.
-- Next: run TN1 and read the clock columns per run to confirm or reject hypothesis B.
+- 2026-11-17, TN1 bench (old sampler, no clock columns): c=1 was stable across 3 repeats at 19.8 / 18.4 /
+  18.6 tok/s (CV 4.2%), ITL p50 51–52 ms, power 65.3–65.5 W. Average power stayed at 64–66 W at every
+  concurrency from 1 to 256, i.e. the card sat just under its 70 W cap the whole time. The 13.1 tok/s smoke
+  run now looks like the outlier, and the run-to-run noise in TN1 is mostly workload, not hardware (S-010).
+- Next: one smoke run with the new sampler (commit 28186be) to see the clock and throttle reasons at the
+  power cap.
 
 **Pitch.** "My first smoke test gave 13 tokens/s where the roofline said about 50, and a second identical run
 gave 19. I cross-checked against vLLM's own counters to rule out my client, then saw throughput drifting
@@ -192,3 +197,136 @@ package version (D-001). Docker image tags play that role on RunPod.
 T4 and froze the full environment to a lock file, so every number can be reproduced on a fresh session."
 
 **Animation.** A notebook session that resets to empty, then rebuilds itself from the lock file into the same state.
+
+---
+
+## S-006 One GPU, 42× cheaper per token: the TN1 curve
+
+Status: **confirmed** · Date: 2026-11-17 · Experiment: TN1 (`results/runs.jsonl`, 42 runs, 11,904 requests, 0 errors)
+
+**Context.** Full TN1 sweep, concurrency 1 → 256, 3 repeats per level, run 2026-11-16 16:55–18:38 UTC
+(1 h 43 min), git commit `e33b9c7`, vLLM 0.33.0, driver 580.178.04, CUDA 13.0.
+
+**Observation.** Means over the accepted repeats (c=128 had no accepted set; its 6 runs are shown):
+
+| c | tokens/s | TTFT p50 ms | TTFT p99 ms | ITL p50 ms | J/token | avg W |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 18.9 | 56 | 2,194 | 51.9 | 3.461 | 65.4 |
+| 2 | 59.0 | 113 | 3,571 | 30.9 | 1.116 | 65.9 |
+| 4 | 117.0 | 194 | 1,269 | 32.6 | 0.563 | 65.8 |
+| 8 | 195.7 | 687 | 2,835 | 35.5 | 0.336 | 65.8 |
+| 16 | 339.3 | 666 | 4,201 | 39.2 | 0.194 | 65.7 |
+| 32 | 453.2 | 1,862 | 6,861 | 54.5 | 0.145 | 65.7 |
+| 64 | 619.7 | 3,066 | 11,647 | 71.4 | 0.104 | 64.7 |
+| 128 (6 runs, all discarded) | 688.9 (628.8–777.7) | | | 123.8 | 0.095 | |
+| 256 | 792.0 | 6,581 | 30,120 | 201.6 | 0.082 | 64.6 |
+
+**Reasoning.**
+- Throughput grows ~2× per doubling up to c=4, ~1.7× to c=16, ~1.35× to c=64, then only ~1.1–1.15×.
+  The knee is around c=32–64.
+- Power is flat (64–66 W) at every level, so energy per token is simply power ÷ throughput:
+  3.461 → 0.082 J/token, **42× cheaper** at c=256 than at c=1.
+- Per-user experience gets worse: ITL 31 ms at c=2 (≈32 tok/s per user) vs 202 ms at c=256 (≈5 tok/s per user),
+  and TTFT p50 grows from 56 ms to 6.6 s.
+
+**Outcome.** The operating point depends on the latency target. Example reading (to be checked once SLOs are
+chosen): if a user needs ≥ 20 tok/s streaming (ITL ≤ 50 ms), c=16 is the last level that qualifies, at
+339 tok/s and 0.194 J/token.
+
+**Pitch.** "On one T4 the card drew about 65 W no matter how many users it served, so batching was the whole
+efficiency story: going from 1 to 256 concurrent users cut energy per token 42×. But per-user speed fell from
+about 32 to 5 tokens/s, so the right concurrency is set by the latency SLO, not by peak throughput."
+
+**Follow-ups.**
+- *Why does power not rise with load?* The GPU is already at the edge of its 70 W cap at batch 1 (99.9% busy);
+  more users means more useful work per step, not more watts.
+- *What is goodput?* Throughput counted only while the latency SLO holds; it picks the operating point.
+
+**Animation.** Two linked charts with a concurrency slider: throughput rising then flattening, and a battery
+icon whose J/token cost shrinks; a per-user "typing speed" meter slows as the slider moves right.
+
+---
+
+## S-007 Two users get faster tokens than one
+
+Status: **open** · Date: 2026-11-17 · Experiment: TN1
+
+**Observation.** ITL p50 is 51.9 ms at c=1 but 30.9 ms at c=2 (and 32.6 at c=4). Throughput jumps 3.1×
+(18.9 → 59.0 tok/s) for 2× the users. Power is the same (65.4 vs 65.9 W).
+
+**Reasoning.** Decode at batch 2 should be slightly slower per step than batch 1, never 40% faster. At c=2
+the effective weight-read bandwidth is 6 GB ÷ 31 ms ≈ 200 GB/s (≈ 60% of the T4's 320 GB/s); at c=1 it is only
+≈ 120 GB/s. Something specific to batch size 1 is slow. Candidates: a poorly tuned kernel for M=1 matrix
+multiplies on Turing, the CUDA-graph / compiled path for size 1, or how the engine schedules a lone request.
+
+**Next.** Re-run c=1 and c=2 with `--enforce-eager` (no CUDA graphs, no compile) and compare; if the gap
+remains, profile one decode step at batch 1 vs 2.
+
+**Pitch (if confirmed).** "My batch-1 numbers were slower per token than batch-2, which should be impossible
+for a memory-bound decode. It turned out to be [cause], so on this GPU single-stream latency is a kernel
+problem, not a hardware limit."
+
+**Animation.** Two pipes reading the same tank of weights: the single-user pipe is narrower than the two-user one.
+
+---
+
+## S-008 My KV-cache prediction was wrong, and that is the interesting part
+
+Status: **confirmed** · Date: 2026-11-17 · Experiment: TN1 (`server_0.log`)
+
+**Observation.** I predicted TTFT p99 would jump when the KV-cache filled up. At c=256 vLLM's log shows
+`Running: 256 reqs, Waiting: 0 reqs` with GPU KV cache usage at most **44.0%**, and 0 preemptions in the log.
+Average prompt ≈ 210–230 tokens + 256 output tokens ≈ 480 tokens × 256 users ≈ 123k tokens, under the
+184,496-token pool.
+
+**Reasoning.** With realistic (short) chat prompts the KV-cache was never the limit on one T4. The plateau
+(~790 tok/s) and the TTFT growth come from step time: at c=256 every decode step takes ~200 ms (ITL), and a
+new request's prefill has to share steps with 255 others. With the card pinned at its power cap, the limit is
+compute/power, not memory capacity. To be confirmed with clock data (S-001).
+
+**Pitch.** "I expected KV-cache capacity to be the wall. The log showed 44% usage at 256 users, so for chat-length
+prompts on a T4 the limit was compute under a 70 W power cap. KV-cache becomes the wall with long contexts,
+which is a separate experiment."
+
+**Animation.** The KV memory bar from S-003 filling only to 44% while a clock/power gauge is pegged at the limit.
+
+---
+
+## S-009 Tail TTFT at one user is the prompt length, not a queue
+
+Status: **confirmed** · Date: 2026-11-17 · Experiment: TN1 c=1 (`requests.csv`)
+
+**Observation.** At c=1, TTFT p50 is 56 ms but p99 is 1.6–2.8 s. Across the 96 c=1 requests, TTFT correlates
+with prompt length at r = 0.967, slope ≈ 0.83 ms per prompt token: 4-token prompts start in ~46 ms, the
+3,486-token prompt took 3,722 ms.
+
+**Reasoning.** With one user there is no queue, so the tail is prefill time. 0.83 ms per token ≈ 1,200 prompt
+tokens/s of prefill on a T4.
+
+**Pitch.** "Even with one user, my p99 TTFT was almost 3 seconds. That was not queueing: TTFT tracked prompt length
+with r = 0.97, about 0.8 ms per prompt token, so long prompts are a prefill cost you pay regardless of load."
+
+**Animation.** Scatter plot of prompt length vs TTFT with the fitted line; dots light up as each request runs.
+
+---
+
+## S-010 Half the noise came from my own workload
+
+Status: **confirmed** · Date: 2026-11-17 · Experiment: TN1
+
+**Observation.** 5 of 9 levels needed a re-run (CV > 5%), and c=128 was discarded twice. At c=4 the discarded
+set had repeats with mean prompt lengths of 203, **450** and **48** tokens, giving 115.1 / 101.6 / 125.2 tok/s
+and TTFT p99 from 169 ms to 2,580 ms.
+
+**Reasoning.** Each repeat uses fresh ShareGPT prompts (D-005, to avoid prefix-cache reuse). With only 32
+requests per level, the mean prompt length varies a lot between repeats, and the numbers follow it. The
+hardware was steady (power 64–66 W throughout).
+
+**Outcome / options.** Keep fresh prompts but make repeats comparable: draw each repeat from the same
+length distribution (stratify by prompt length) or raise `min_requests`. Report CV next to every number.
+
+**Pitch.** "My CV gate kept rejecting repeats, and the cause was not the GPU: with 32 fresh prompts per repeat,
+one repeat averaged 48 prompt tokens and another 450. Controlling the workload distribution matters as much
+as controlling the hardware."
+
+**Animation.** Three repeat "buckets" of prompts with visibly different sizes, each feeding a throughput bar.
