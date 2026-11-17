@@ -20,16 +20,18 @@ def git_commit() -> str:
     return sha + ("-dirty" if dirty else "")
 
 
-def gpu_info() -> dict[str, str | int]:
+def gpu_info() -> dict[str, str | int | list[str]]:
     try:
         import pynvml
 
         pynvml.nvmlInit()
     except Exception:
-        return {"gpu": "none", "gpu_count_visible": 0, "driver": "none", "cuda_driver": "none"}
+        return {"gpu": "none", "gpu_count_visible": 0, "gpu_uuids": [], "driver": "none", "cuda_driver": "none"}
     try:
         count = pynvml.nvmlDeviceGetCount()
         name = pynvml.nvmlDeviceGetName(pynvml.nvmlDeviceGetHandleByIndex(0)) if count else "none"
+        # Identifies the physical card, so runs from different sessions can be matched (STORIES S-013).
+        uuids = [_str(pynvml.nvmlDeviceGetUUID(pynvml.nvmlDeviceGetHandleByIndex(i))) for i in range(count)]
         driver = pynvml.nvmlSystemGetDriverVersion()
         cuda = pynvml.nvmlSystemGetCudaDriverVersion()  # e.g. 12040 -> "12.4"
     finally:
@@ -37,6 +39,7 @@ def gpu_info() -> dict[str, str | int]:
     return {
         "gpu": _str(name),
         "gpu_count_visible": count,
+        "gpu_uuids": uuids,
         "driver": _str(driver),
         "cuda_driver": f"{cuda // 1000}.{cuda % 1000 // 10}",
     }

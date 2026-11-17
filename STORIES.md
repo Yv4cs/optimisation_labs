@@ -261,7 +261,7 @@ icon whose J/token cost shrinks; a per-user "typing speed" meter slows as the sl
 
 ## S-007 Two users get faster tokens than one
 
-Status: **open** · Date: 2026-11-17 · Experiment: TN1
+Status: **resolved** (not a batch-size effect; see final update) · Date: 2026-11-17 · Experiment: TN1, eager, graphs
 
 **Observation.** ITL p50 is 51.9 ms at c=1 but 30.9 ms at c=2 (and 32.6 at c=4). Throughput jumps 3.1×
 (18.9 → 59.0 tok/s) for 2× the users. Power is the same (65.4 vs 65.9 W).
@@ -295,6 +295,36 @@ remains, profile one decode step at batch 1 vs 2.
 - Missing: graphs at c=2 on the same card in the same session as eager. Config
   `t4_qwen3b_fp16_graphs.yaml` (same as the eager config minus the flag) closes that gap; run it next to the
   eager config in one session.
+
+**Update 2026-11-17 evening: the controlled re-run (graphs and eager back to back, same session, GPU 0).**
+
+| Run | c=1 ITL p50 (2 repeats) | c=2 ITL p50 | SM clock c=1 / c=2 | Power c=1 |
+|---|---|---|---|---|
+| graphs | **28.4 / 29.0 ms** | 30.0 / 29.2 ms | 720–750 / 1,050–1,080 MHz | 69.4 W |
+| eager | 39.3 / 38.4 ms | 38.2 / 39.1 ms | 1,230–1,245 / 1,335–1,350 MHz | 68.0 W |
+
+- **The anomaly did not reproduce.** With graphs, c=1 is as fast per token as c=2, and graphs beat eager by
+  ~25% at both batch sizes, as expected (graphs remove per-kernel launch overhead).
+- Across three sessions the numbers line up like this:
+  - graphs c=1: 51.9 ms (16 Nov), 42–47 ms (17 Nov morning), 28.7 ms (17 Nov evening);
+  - graphs c=2: 30.9 ms (16 Nov), 29.6 ms (17 Nov evening);
+  - eager c=1: 38.4 ms (17 Nov morning), 38.6 ms (17 Nov evening).
+  Only one number moves: **batch 1 with CUDA graphs**. Eager is stable but slower; c=2 with graphs is stable.
+- Clocks explain the direction: the graphs batch-1 path runs right at the power cap, at 390–555 MHz in the slow
+  session and 720–750 MHz in the fast one. Eager has CPU gaps between kernel launches, so it is less
+  power-dense, holds ~1,200 MHz, and is limited by launch overhead instead.
+
+**Status: resolved as "not a batch-size effect".** The TN1 c=1 point is a session/card artefact of a
+power-capped GPU, not something batch 1 does wrong. Still open: why batch 1 is the most sensitive point (one
+guess: at batch 1 the kernels are pure memory streaming, and GDDR6 power competes with SM clock for the same
+70 W). We could not prove that the three sessions used different physical cards, so `env.json` now records
+the GPU UUIDs.
+
+**Pitch (final).** "I found that one user got slower tokens than two, which made no sense for a memory-bound
+decode. Turning off CUDA graphs made it disappear, but so did simply re-running in a new session: only the
+batch-1 graphs number moved, from 52 to 29 ms, while everything else was stable to a few percent. On a
+power-capped card, single-stream latency is the least reproducible number you can quote, so I now record the
+clock, power reason and GPU UUID with every run and compare only within a session."
 
 **Pitch (if confirmed).** "My batch-1 numbers were slower per token than batch-2, which should be impossible
 for a memory-bound decode. It turned out to be [cause], so on this GPU single-stream latency is a kernel
@@ -367,7 +397,7 @@ as controlling the hardware."
 
 ---
 
-## S-011 INT4 weights: 4× faster for one user, nothing gained at 256
+## S-011 INT4 weights: ~3.5× faster for one user, nothing gained at 256
 
 Status: **confirmed** (speed), quality **not measured** · Date: 2026-11-17 · Experiment: TN2a
 (`t4-qwen2.5-3b-awq-vllm`, 21 runs, same ShareGPT prompts as TN1)
@@ -386,8 +416,10 @@ helping once it is compute-bound (high concurrency).
 | 64 | 682.2 | 619.7 | 55.4 ms | 71.4 ms | 0.096 | 0.104 |
 | 256 | 809.9 | 792.0 | 190.9 ms | 201.6 ms | 0.081 | 0.082 |
 
-- TN1 ran in an earlier session. A same-session, same-card FP16 batch-1 reference is DP=2 replica 0 at
-  42–47 ms per token (S-007), so the fair batch-1 gain is ≈ 3.3–3.7×, still large.
+- TN1 ran in an earlier session, and batch-1 FP16 with CUDA graphs turned out to be the least stable number
+  (S-007: 51.9, 42–47 and 28.7 ms in three sessions). The same-session, same-card reference is DP=2 replica 0
+  at 42–47 ms per token, so the fair batch-1 gain is **≈ 3.3–3.7×**; against the best FP16 batch-1 we ever
+  saw (28.7 ms) it is still 2.3×. Quote "about 3.5×, same session", not the 4× from the table.
 - KV pool: 296,288 tokens (FP16: 194,160), because the weights take less memory.
 - SM clock at c=1: 1,020–1,110 MHz (FP16 graphs on the same card: 390–555 MHz).
 
@@ -396,11 +428,11 @@ helping once it is compute-bound (high concurrency).
 dominated by compute on 256 rows, and AWQ must dequantize weights inside the kernel, so the byte saving no
 longer shows: +2% throughput, same J/token.
 
-**Outcome.** INT4 is a latency and single-user energy optimisation on this card (4× less energy per token at
-c=1), not a peak-throughput one. Accuracy cost is unknown: needs a GSM8K or similar check before recommending it.
+**Outcome.** INT4 is a latency and single-user energy optimisation on this card (0.893 vs 3.461 J/token at
+c=1 against TN1), not a peak-throughput one. Accuracy cost is unknown: needs a GSM8K or similar check before recommending it.
 
-**Pitch.** "Quantising to INT4 made one user's tokens 4× faster and 4× cheaper in energy, because batch-1
-decode is just reading weights. At 256 users it gave 2%, because by then the GPU is compute-bound. So
+**Pitch.** "Quantising to INT4 made one user's tokens about 3.5× faster on the same card, and far cheaper in energy,
+because batch-1 decode is just reading weights. At 256 users it gave 2%, because by then the GPU is compute-bound. So
 quantisation is a latency tool first, and I would still check accuracy before shipping it."
 
 **Follow-ups.**
@@ -409,7 +441,7 @@ quantisation is a latency tool first, and I would still check accuracy before sh
 - *Would FP8 on H100 behave the same?* FP8 has native tensor-core support on Hopper, so it can also speed up the
   compute-bound regime; that is what TN4 measures.
 
-**Animation.** Two book stacks (16-bit vs 4-bit) being read by a single reader: the thin book is done 4× sooner.
+**Animation.** Two book stacks (16-bit vs 4-bit) being read by a single reader: the thin book is done several times sooner.
 Then 256 readers crowd in and both stacks are bottlenecked at the same desk.
 
 ---
@@ -495,8 +527,8 @@ slow, and tokens drip out at visibly different rates.
 
 ## S-014 Long shared prompts: now the KV-cache is the wall
 
-Status: **open** (prefix caching ON run pending) · Date: 2026-11-17 · Experiment: TN2b, prefix caching OFF
-(`t4-qwen2.5-3b-fp16-vllm-prefix-off`)
+Status: **confirmed** · Date: 2026-11-17 · Experiment: TN2b, prefix caching OFF and ON
+(`t4-qwen2.5-3b-fp16-vllm-prefix-off`, `…-prefix-on`)
 
 **Context.** Every prompt starts with the same 1,024-token block (think: a long system prompt) followed by a
 ShareGPT question, so mean prompt length is 1,192–1,259 tokens. vLLM log confirms `enable_prefix_caching=False`.
@@ -523,9 +555,41 @@ the same concurrency.
 **Prediction for prefix caching ON.** The shared 1,024 tokens are prefilled once and stored once, so per-user
 prefill drops to ~200 tokens and per-user KV to ~450 tokens. TTFT should fall sharply and all 256 users should fit.
 
-**Pitch (to finish).** "With a 1,000-token system prompt and caching off, 256 users meant 150-second TTFTs:
-half of them waited because the KV-cache was 98% full, and the GPU spent its time re-reading the same system
-prompt. Turning prefix caching on [result]."
+**Result with prefix caching ON** (same prompts, same seeds; ran in a later session, see caveat).
+
+| c | tok/s off → on | TTFT p50 off → on | TTFT p99 off → on | ITL p50 off → on | J/token off → on |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 24.1 → 32.8 | 540 → **84 ms** | 2.3 → 1.7 s | 39.5 → 29.4 ms | 2.748 → 2.089 |
+| 4 (both unstable) | 84.7 → 102.2 | 1.6 → 0.3 s | 4.2 → 3.1 s | 35.5 → 34.7 ms | 0.782 → 0.668 |
+| 16 | 171.2 → 254.9 | 3.4 → 1.7 s | 10.0 → 4.4 s | 54.1 → 52.2 ms | 0.383 → 0.266 |
+| 64 | 225.6 → 399.0 | 4.5 → 3.9 s | 44.2 → 14.1 s | 125.3 → 118.8 ms | 0.286 → 0.169 |
+| 256 | 214.9 → **442.9** | 152.5 → **9.4 s** | 244.1 → 53.3 s | 257.3 → 387.4 ms | 0.300 → **0.151** |
+
+vLLM log at c=256 with caching ON: `Running: 256 reqs, Waiting: 0 reqs`, KV usage 65.8–71.2%, **prefix cache
+hit rate 81–84%**, 0 preemptions (pool 184,496 tokens in that session). In steady state the log shows
+`Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 716.8 tokens/s`: almost no prefill left.
+
+- The prediction held: every user fits (0 waiting instead of ~125), TTFT p50 at c=256 drops 16×,
+  throughput doubles, energy per token halves.
+- ITL at c=256 got *worse* (257 → 387 ms). That is the price of success: 256 users now decode in every step
+  instead of ~130, so each step is bigger. Same trade-off as S-006: more users per step, slower per user.
+- 81–84% hit rate ≈ 1,024 shared tokens out of ~1,220 per prompt, so the cache is reusing almost exactly the
+  shared block, as designed.
+
+**Caveat.** OFF ran in the 17 Nov morning session, ON in the evening session, and S-007 shows batch-1 numbers
+moved between those sessions. So the c=1 row (TTFT 540 → 84 ms is still prefill, not clocks) is the least
+clean; at c ≥ 16 the effects (2× throughput, 16× TTFT p50) are far larger than any session noise we measured.
+
+**Pitch.** "With a 1,000-token system prompt and caching off, 256 users meant 150-second median TTFTs: half of
+them waited outside a 98%-full KV-cache while the GPU re-read the same system prompt for each of them.
+Turning prefix caching on gave an 82% cache hit rate, every user fitted, median TTFT fell to 9 seconds,
+throughput doubled and energy per token halved, with one setting and no new hardware."
+
+**Follow-ups.**
+- *Why is prefix caching not always on?* In vLLM V1 it is on by default; we turned it off in other
+  experiments so that repeats with similar prompts could not borrow each other's cache (D-005).
+- *What about different system prompts per customer?* The cache works per identical prefix; many tenants with
+  different prompts share less, and eviction policy matters. SGLang's RadixAttention generalises this to a tree.
 
 **Animation.** The S-003 memory bar, now filled to the brim with identical blue "system prompt" blocks, one
 per user, and a queue outside; then the caching switch flips and the blue blocks collapse into one shared block.
