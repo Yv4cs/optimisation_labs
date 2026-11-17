@@ -10,23 +10,53 @@ import time
 from pathlib import Path
 
 import httpx
+import yaml
 
 from .config import Experiment
 
-# AWQ checkpoints carry their quantization config; the runtime picks the fastest AWQ kernel for the GPU.
+# Quantized checkpoints (AWQ, ModelOpt FP8) carry their quantization config and every runtime reads it, so
+# no --quantization flag (D-010, D-011). "fp8" also stores the KV-cache in FP8 on every runtime: the ModelOpt
+# checkpoint ships KV scales, and leaving it to each engine's default would make the KV dtype differ by engine.
 _PRECISION_ARGS = {
-    "fp16": ["--dtype", "float16"],
-    "bf16": ["--dtype", "bfloat16"],
-    "fp8": ["--quantization", "fp8"],
-    "awq-int4": ["--dtype", "float16"],
+    "vllm": {
+        "fp16": ["--dtype", "float16"],
+        "bf16": ["--dtype", "bfloat16"],
+        "fp8": ["--kv-cache-dtype", "fp8"],
+        "awq-int4": ["--dtype", "float16"],
+    },
+    "sglang": {
+        "fp16": ["--dtype", "float16"],
+        "bf16": ["--dtype", "bfloat16"],
+        "fp8": ["--kv-cache-dtype", "fp8_e4m3"],
+        "awq-int4": ["--dtype", "float16"],
+    },
 }
 
 
-def build_command(exp: Experiment, port: int) -> list[str]:
+def trtllm_options(exp: Experiment) -> dict:
+    """LLM API options for trtllm-serve, which takes KV-cache settings only from a YAML file."""
+    if exp.precision not in ("bf16", "fp8"):
+        raise ValueError(f"trtllm runs are planned for bf16/fp8 on H100 only, got {exp.precision}")
+    kv_cache = {"enable_block_reuse": exp.prefix_caching}  # block reuse is TRT-LLM's prefix caching
+    if exp.precision == "fp8":
+        kv_cache["dtype"] = "fp8"
+    return {"kv_cache_config": kv_cache}
+
+
+def build_command(exp: Experiment, port: int, options_path: Path = Path("trtllm_options.yaml")) -> list[str]:
+    """`options_path` is only used by trtllm; ServerGroup writes trtllm_options() there before launching."""
+    if exp.runtime == "trtllm":
+        cmd = ["trtllm-serve", "serve", exp.model, "--host", "127.0.0.1", "--port", str(port)]
+        cmd += ["--tp_size", str(exp.tp), "--extra_llm_api_options", str(options_path)]
+        if exp.max_num_seqs is not None:
+            cmd += ["--max_batch_size", str(exp.max_num_seqs)]
+        if exp.max_model_len is not None:
+            cmd += ["--max_seq_len", str(exp.max_model_len)]
+        return cmd + exp.extra_server_args
     if exp.runtime == "vllm":
         cmd = ["vllm", "serve", exp.model, "--host", "127.0.0.1", "--port", str(port)]
         cmd += ["--tensor-parallel-size", str(exp.tp)]
-        cmd += _PRECISION_ARGS[exp.precision]
+        cmd += _PRECISION_ARGS["vllm"][exp.precision]
         cmd.append("--enable-prefix-caching" if exp.prefix_caching else "--no-enable-prefix-caching")
         if exp.max_num_seqs is not None:
             cmd += ["--max-num-seqs", str(exp.max_num_seqs)]
@@ -35,7 +65,7 @@ def build_command(exp: Experiment, port: int) -> list[str]:
     else:  # sglang
         cmd = [sys.executable, "-m", "sglang.launch_server", "--model-path", exp.model]
         cmd += ["--host", "127.0.0.1", "--port", str(port), "--tp-size", str(exp.tp)]
-        cmd += _PRECISION_ARGS[exp.precision]
+        cmd += _PRECISION_ARGS["sglang"][exp.precision]
         if not exp.prefix_caching:
             cmd.append("--disable-radix-cache")
         if exp.max_num_seqs is not None:
@@ -66,8 +96,11 @@ class ServerGroup:
                 # PCI order makes CUDA device ids match NVML ids used by the power sampler.
                 env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpus, "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
                 log = open(self.log_dir / f"server_{i}.log", "w")
+                options_path = self.log_dir / f"trtllm_options_{i}.yaml"
+                if self.exp.runtime == "trtllm":
+                    options_path.write_text(yaml.safe_dump(trtllm_options(self.exp)))
                 proc = subprocess.Popen(
-                    build_command(self.exp, self.exp.port + i),
+                    build_command(self.exp, self.exp.port + i, options_path),
                     env=env,
                     stdout=log,
                     stderr=subprocess.STDOUT,
