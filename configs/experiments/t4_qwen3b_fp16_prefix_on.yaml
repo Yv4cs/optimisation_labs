@@ -1,0 +1,26 @@
+# TN2b: every request = the same 1024-token "system prompt" + a unique ShareGPT question.
+# Run once with prefix caching off and once on; the workload is identical, only the flag changes.
+# Expectation: with caching, TTFT drops (the shared prefix is prefilled once) and the shared KV blocks
+# leave room for more concurrent users.
+name: t4-qwen2.5-3b-fp16-vllm-prefix-on
+milestone: M2
+runtime: vllm
+model: Qwen/Qwen2.5-3B-Instruct
+precision: fp16
+tp: 1
+dp: 1
+max_model_len: 4096
+prefix_caching: true
+interconnect: PCIe
+pod_hourly_usd: 0.0
+
+concurrency: [1, 4, 16, 64, 256]
+dataset:
+  kind: shared_prefix
+  input_len: 1024  # shared prefix length in tokens
+  output_len: 256
+min_requests: 32
+requests_per_slot: 4
+warmup_requests: 16
+repeats: 3
+max_cv: 0.05

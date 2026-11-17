@@ -1,4 +1,5 @@
-"""Prompt pools: real chat prompts (ShareGPT) and fixed-length long-context prompts."""
+"""Prompt pools: real chat prompts (ShareGPT), fixed-length long-context prompts, and ShareGPT prompts
+behind one shared prefix (a long system prompt) for the prefix-caching experiment."""
 
 from __future__ import annotations
 
@@ -30,6 +31,8 @@ def load_prompts(spec: DatasetSpec, model: str, n: int, max_prompt_tokens: int) 
     tokenizer = AutoTokenizer.from_pretrained(model)
     if spec.kind == "sharegpt":
         return _sharegpt(tokenizer, n, max_prompt_tokens, spec.seed)
+    if spec.kind == "shared_prefix":
+        return _shared_prefix(tokenizer, n, max_prompt_tokens, spec.input_len, spec.seed)
     return _long_context(tokenizer, n, spec.input_len, spec.seed)
 
 
@@ -66,3 +69,12 @@ def _long_context(tokenizer, n: int, input_len: int, seed: int) -> list[Prompt]:
         ids = head_ids + filler_ids[: input_len - len(head_ids)]
         prompts.append(Prompt(tokenizer.decode(ids), len(ids)))
     return prompts
+
+
+def _shared_prefix(tokenizer, n: int, max_prompt_tokens: int, prefix_len: int, seed: int) -> list[Prompt]:
+    # Identical text up front, so a prefix cache can reuse its KV blocks; the question after it is unique.
+    filler_ids = tokenizer.encode(_FILLER, add_special_tokens=False)
+    prefix = tokenizer.decode((filler_ids * (prefix_len // len(filler_ids) + 1))[:prefix_len]) + "\n\n"
+    prefix_tokens = len(tokenizer.encode(prefix, add_special_tokens=False))
+    questions = _sharegpt(tokenizer, n, max_prompt_tokens - prefix_tokens, seed)
+    return [Prompt(prefix + q.text, prefix_tokens + q.prompt_tokens) for q in questions]
