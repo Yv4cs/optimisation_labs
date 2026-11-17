@@ -11,7 +11,7 @@ shown as "not measured".
 
 | Experiment | GPU | Result |
 |---|---|---|
-| vLLM FP16 baseline, concurrency 1→256 | 1× T4 | not measured |
+| vLLM FP16 baseline, concurrency 1→256 | 1× T4 | 18.9 → 792 tok/s; 3.46 → 0.082 J/token (STORIES S-006) |
 | FP16 vs AWQ-INT4, prefix caching | 1× T4 | not measured |
 | TP=2 vs 2 replicas | 2× T4 (PCIe) | not measured |
 | vLLM vs SGLang vs TensorRT-LLM, BF16 vs FP8 | 1× H100 | not measured |
