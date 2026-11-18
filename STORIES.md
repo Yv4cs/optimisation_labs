@@ -205,6 +205,17 @@ different vLLM next time.
 **Outcome.** Install `vllm==0.33.0` explicitly, then `make freeze` writes `env/lock-kaggle.txt` with every
 package version (D-001). Docker image tags play that role on RunPod.
 
+**Update 2026-11-19: the lock file lied twice.**
+- Kaggle: the first `make freeze` ran in a fresh session *before* `make setup`, so the lock had Kaggle's own torch 2.11
+  and no vLLM. Fixed by freezing right after setup and checking for the `vllm==` line.
+- H100: each engine lived in its own `uv` venv, but `pip freeze` resolved to the template's *system* pip (uv venvs
+  have no pip), so all three "per-engine" lock files were the same system environment (torch 2.8.0+cu129, no
+  engine). Caught by grepping for the engine line; the files were dropped. The per-run `env.json` was right, because
+  it is written by the harness from inside the venv: vLLM 0.33.0 + torch 2.14.0; SGLang 0.5.23 + torch 2.14.1;
+  TensorRT-LLM 1.2.1 + torch 2.9.1+cu130; all Python 3.12.3, CUDA 13.0, driver 595.112.07.
+- Lesson: a lock file is only evidence if you check it contains the thing you are locking. Use
+  `uv pip freeze --python <venv>/bin/python`.
+
 **Pitch.** "On Kaggle I could not use containers, so I pinned the engine version that I had verified on the
 T4 and froze the full environment to a lock file, so every number can be reproduced on a fresh session."
 
@@ -619,3 +630,131 @@ per-tensor checkpoint and pinned the KV-cache dtype on every engine. Otherwise I
 quantization recipes, not engines."
 
 **Animation.** Three engine doors and two FP8 "keys": the block-scaled key fits two doors, the per-tensor key fits all three.
+
+---
+
+## S-016 At 20,000 tokens/s the measuring tool starts to blink
+
+Status: **confirmed** · Date: 2026-11-19 · Experiment: TN4, H100 (`requests.csv`, vLLM `server_0.log`)
+
+**Observation.** The H100 bridge run (Qwen2.5-3B FP16, vLLM) at c=256 reported **ITL p50 = 0.0 ms**, and one vLLM FP8
+repeat at c=256 reported 7.6 ms where the other two said 15.7 ms. Tokens per streamed chunk were 1.00–1.01 in every
+run, so the engine was not merging tokens. Throughput agreed with the server's own counter (bridge: 22,972 tok/s
+measured vs 20,993–23,305 in vLLM's log; BF16: 12,398 vs 12,650–13,015).
+
+**Reasoning.** One Python client reading 256 SSE streams at 20k+ events/s falls behind. Chunks wait in socket
+buffers and are read in bursts, so the gap *between reads* is ~0 even though the server sent them ~9 ms apart. Total
+tokens and wall time are unaffected, so throughput and J/token stay right; only inter-chunk timing breaks.
+
+**Outcome.** For H100 comparisons we report **TPOT** = (end − first chunk) ÷ (tokens − 1) per request, which does
+not depend on when each chunk was read. The bridge run at c=256: ITL p50 0.0 ms, TPOT p50 8.84 ms. Throughput is
+cross-checked against the server log. A multi-process load generator is the real fix (not done).
+
+**Pitch.** "At 23,000 tokens per second my load generator became part of the system under test: inter-token latency
+read as zero. I cross-checked throughput against the server's own counters, switched to time-per-output-token, which
+is robust to bursty reads, and noted that the client needs to scale out before going faster."
+
+**Animation.** A mail carrier who checks the mailbox once a minute: letters arrive every 9 ms but are opened in piles.
+
+---
+
+## S-017 Same model, same GPU: the engine was the smallest lever
+
+Status: **confirmed** · Date: 2026-11-19 · Experiment: TN4, 1× H100 SXM, Qwen3-8B
+
+**Observation.** Means over 3 repeats (all accepted on the first attempt except TRT-LLM FP8 c=64). TPOT is the
+per-request median (S-016).
+
+| c | vLLM BF16 | SGLang BF16 | TRT-LLM BF16 | vLLM FP8 | SGLang FP8 | TRT-LLM FP8 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 tok/s | 145.8 | 150.4 | 139.6 | 222.6 | 214.6 | 222.1 |
+| 1 TPOT | 6.78 ms | 6.58 | 7.05 | 4.41 | 4.59 | 4.36 |
+| 16 tok/s | 2,034 | 2,034 | 1,860 | 3,044 | 2,851 | 3,045 |
+| 64 tok/s | 6,483 | 6,441 | 5,960 | 9,146 | 8,989 | 8,991 |
+| 256 tok/s | 12,398 | 12,333 | **8,882** | 16,432 | 16,361 | **8,530** |
+| 256 J/token | 0.054 | 0.055 | 0.064 | 0.039 | 0.039 | 0.044 |
+
+- vLLM vs SGLang: within 4% everywhere except FP8 c=16 (vLLM +6.8%); at c=256 within 0.6%, inside the repeat CV.
+- FP8 vs BF16 (vLLM): +53% at c=1, +50% at c=16, +41% at c=64, **+33% at c=256**; J/token 0.054 → 0.039.
+- Batching (vLLM FP8, c=1 → 256): 74× throughput, J/token 1.866 → 0.039 (48× less).
+- TRT-LLM matches the others up to c=64, then falls behind at c=256 (S-018).
+
+**Reasoning.** For a standard dense model and plain decoding, all three engines end up running similar kernels
+(FlashAttention-class attention, cuBLAS/CUTLASS GEMMs, CUDA graphs) at the hardware limit, so their differences
+are a few percent. Precision changes the bytes and FLOPs per token, and batching changes how many tokens share
+each weight read; both are an order of magnitude bigger. Contrast with T4 INT4 (+2% at c=256, S-011): Hopper has
+FP8 tensor cores, so FP8 also helps when compute-bound.
+
+**Outcome.** RECIPES R7–R9. Engine choice should be driven by features and operations (prefix-cache behaviour,
+structured output, ease of deployment, defaults) more than by peak tokens/s on this kind of workload.
+
+**Pitch.** "On one H100 with Qwen3-8B, vLLM and SGLang were within a few percent of each other. FP8 gave 33–53%,
+and batching gave 74× in throughput. If someone asks which engine is fastest, my answer is: first fix precision and
+batch size; then the engine is a 5% question, unless its defaults break something, which is what happened with
+TensorRT-LLM at 256 users."
+
+**Animation.** Three bar-chart races that finish together, while two big levers labelled "FP8" and "batch size"
+move all three bars at once.
+
+---
+
+## S-018 TensorRT-LLM at 256 users: the GPU was 37% busy
+
+Status: **open** (strong suspect, fix not tested) · Date: 2026-11-19 · Experiment: TN4 TRT-LLM 1.2.1
+
+**Observation.** TRT-LLM matched vLLM up to c=64 (FP8 c=64: 8,991 vs 9,146 tok/s), then at c=256 FP8 dropped to
+**8,530 tok/s**, *below its own c=64*, and half of vLLM's 16,432. At c=256 the sampler shows GPU utilisation **37%**
+(FP8) and 69% (BF16), power **347–379 W** vs ~670 W for vLLM, and the SM clock at its 1,980 MHz maximum, so the GPU
+was not throttled: it was idle. TTFT p50 was only 0.5–0.9 s, so requests were not queueing.
+
+**Reasoning.**
+- *Queueing / KV-cache admission.* Rejected: low TTFT; vLLM's FP8 KV pool for the same model is 878,960 tokens.
+- *Python postprocessing (detokenisation) in one process.* Tested: `--num_postprocess_workers 8` gave 8,561 tok/s
+  (no change). Rejected.
+- *CUDA graphs not covering the batch.* Strong suspect: the server log says `Creating CUDA graph instances for 34
+  batch sizes` and warms up 1–32, 64 and 128. A decode batch of ~256 has no graph and `enable_padding` is off, so
+  every step launches kernels one by one from the CPU. A host-bound step leaves the GPU idle, which matches 37%
+  utilisation and low power. Not yet confirmed: the test (`cuda_graph_config: {max_batch_size: 256,
+  enable_padding: true}`) was prepared but not run, to stay inside the budget.
+
+**Outcome.** TRT-LLM's numbers are reported as measured with defaults, with this caveat next to them. RECIPES says to
+size `cuda_graph_config.max_batch_size` to the expected decode batch (untested).
+
+**Pitch.** "TensorRT-LLM kept up until 64 users and then collapsed at 256, with the GPU only 37% busy and drawing half
+the power. I ruled out queueing from TTFT and ruled out Python detokenisation with a quick re-run. The log showed CUDA
+graphs were only captured up to batch 128, so at 256 the CPU was launching every kernel. I'd verify that with one
+config change; the general lesson is that 'as shipped' defaults are tuned for some batch range, and you have to check
+that range matches your traffic."
+
+**Follow-ups.**
+- *Why would J/token look almost fine (0.044 vs 0.039)?* The idle GPU draws less power, so J/token hides it. Cost per
+  token does not: at USD 3.99/h it is ≈ USD 0.130 per million tokens vs 0.067 for vLLM, because you pay for the hour.
+
+**Animation.** A GPU gauge stuck at 37% next to a CPU frantically handing it kernels one at a time; then a "graph"
+card that bundles a whole step into one hand-off.
+
+---
+
+## S-019 T4 to H100 on the same model: 12–29× faster, 2.4–3× less energy per token
+
+Status: **confirmed** · Date: 2026-11-19 · Experiment: TN1 (T4) vs `h100-qwen2.5-3b-fp16-vllm` (same model, workload, vLLM 0.33.0)
+
+| c | T4 tok/s | H100 tok/s | × | T4 J/token | H100 J/token |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 18.9 (batch-1 T4 varies 19–35, S-007) | 273.5 | 8–14× | 3.461 | 1.419 |
+| 16 | 339.3 | 4,039.7 | 11.9× | 0.194 | 0.107 |
+| 64 | 619.7 | 12,622.3 | 20.4× | 0.104 | 0.042 |
+| 256 | 792.0 | 22,972.4 | **29×** | 0.082 | **0.027** |
+
+- The gap grows with load: T4 flattens after c≈64 under its 70 W cap (S-006, S-008); the H100 is still scaling at 256.
+- H100 at full load also hits its power limit: at c=256, BF16 runs show NVML reason "SW power cap" in almost every
+  sample, ~692 W and the SM clock down to 1,635–1,680 MHz (max 1,980). FP8 at c=256 draws ~671 W and keeps ~1,965 MHz.
+  Same physics as the T4 (S-001), at 10× the power.
+- Power per card is ~10× (≈ 65 W vs 380–680 W), so energy per token improves far less than speed: 2.4× at c=1, 3× at c=256.
+
+**Pitch.** "Running the exact T4 baseline on an H100 gave 12× at 16 users and 29× at 256, but only 3× less energy per
+token, because the H100 draws ten times the power. And at full load the H100 was power-capped too, just at 700 W
+instead of 70. Power is the constraint at both ends of the range."
+
+**Animation.** Two kitchens side by side with power meters: the small one capped at 70 W, the big one at 700 W; the
+token counters race, and an energy-per-token meter moves much less than the speed meter.
