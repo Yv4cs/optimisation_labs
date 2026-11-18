@@ -33,36 +33,48 @@ Three hours therefore cost about **USD 8** on Community or **USD 12** on Secure.
       `kv_cache_config` (block reuse = prefix caching, FP8 KV). Flags were checked against the v1.2.1 source.
 - [x] FP8 mapping: no `--quantization` flag, because the engines read `quant_method: modelopt`. FP8 KV-cache is set explicitly on every engine (D-011).
 - [x] Configs: `h100_qwen3-8b_{vllm,sglang,trtllm}_{bf16,fp8}.yaml` and `h100_qwen3b_fp16_vllm.yaml`. Tests are green (44).
-- [ ] Push all commits.
+- [x] Push all commits.
 - [ ] Optional: smoke the SGLang path on Kaggle T4 (`runtime: sglang` on the TN1 config). SGLang may not support
       sm_75 well. If it fails there, the first real SGLang run is on the H100, and that is acceptable.
 - [ ] Choose Community or Secure Cloud.
   - RunPod network volumes are, as far as we know, **Secure Cloud only** (verify in the console).
   - Without a volume, each pod downloads its own weights (about 16 GB BF16 and 9 GB FP8, a few minutes) and the results must be copied out before termination (section 3).
 
-## 3. On each pod (one pod per engine image)
+## 3. One pod, one virtualenv per engine (decided 2026-11-19)
 
-Start the pod from the engine image with a command that keeps it alive, for example `sleep infinity`, then open the web terminal.
+We use a single pod from RunPod's PyTorch template, which comes with a working terminal. Each engine gets its own `uv` virtualenv on `/workspace`.
+Why not one pod per engine image: those images may lack the terminal/SSH setup, and every new pod means another image pull and another weights download.
+Engines are installed one at a time, never while a benchmark runs, because a pip install competes for CPU with the engine's scheduler.
+
+**Deploy:** Secure Cloud → **H100 SXM ×1** → template "RunPod PyTorch".
+- Filter **CUDA version ≥ 13.0**: vLLM 0.33 wheels need it; Kaggle ran driver 580 / CUDA 13.0.
+- Volume disk 120 GB at `/workspace`, container disk 30 GB.
 
 ```bash
+# --- once per pod
+nvidia-smi                                  # driver/CUDA must be >= 13.0; note SXM vs PCIe
+apt-get update -qq && apt-get install -y -qq tmux libopenmpi-dev >/dev/null
+pip install -q uv
 export HF_HOME=/workspace/hf
 cd /workspace && git clone https://github.com/Yv4cs/optimisation_labs.git lab && cd lab
-pip install -e . --no-deps && pip install pydantic pyyaml httpx nvidia-ml-py  # never touch the image's torch
-nvidia-smi && nvidia-smi topo -m          # SXM or PCIe, driver: write them down
-python -m infer_lab.env_info              # versions + GPU UUIDs
-python -m pytest -q                       # needs pytest; skip if absent
-# set interconnect and pod_hourly_usd in this engine's configs, then:
-E=vllm   # or sglang / trtllm
+sed -i 's/^pod_hourly_usd: 0.0.*/pod_hourly_usd: 3.99/' configs/experiments/h100_*.yaml   # use the console price
+# if nvidia-smi says PCIe: sed -i 's/^interconnect: SXM.*/interconnect: PCIe/' configs/experiments/h100_*.yaml
+
+# --- per engine (E = vllm | sglang | trtllm)
+uv venv /workspace/venv-$E --python 3.12 && source /workspace/venv-$E/bin/activate
+uv pip install "vllm==0.33.0" -e ".[dev]"            # sglang: "sglang==0.5.23"   trtllm: "tensorrt_llm==1.2.1"
+make env && make test
+tmux new -s $E                                       # benchmarks survive a closed browser tab
 make smoke EXP=configs/experiments/h100_qwen3-8b_${E}_bf16.yaml
 make bench EXP=configs/experiments/h100_qwen3-8b_${E}_bf16.yaml
 make bench EXP=configs/experiments/h100_qwen3-8b_${E}_fp8.yaml
-[ $E = vllm ] && make bench EXP=configs/experiments/h100_qwen3b_fp16_vllm.yaml   # bridge, vLLM pod only
-pip freeze --exclude-editable > env/lock-h100-${E}.txt
-tar czf /workspace/results_${E}.tar.gz results env
+[ $E = vllm ] && make bench EXP=configs/experiments/h100_qwen3b_fp16_vllm.yaml
+pip freeze --exclude-editable > env/lock-h100-$E.txt
+tar czf /workspace/results_h100.tar.gz results env  # re-run after every engine; download it each time
 ```
 
-Copy `results_${E}.tar.gz` off the pod: use a network volume, or `runpodctl send` on the pod and `runpodctl receive` on the laptop.
-Check that the file arrived, **then terminate the pod** before starting the next engine.
+Download `results_h100.tar.gz` after every engine block, through the pod's Jupyter file browser or `runpodctl send`.
+**Terminate the pod** after the last block, once the tarball is on the laptop.
 
 ## 4. Time plan and stop rules
 
@@ -87,8 +99,8 @@ Check that the file arrived, **then terminate the pod** before starting the next
 
 ## Approval
 
-- [ ] Model choice confirmed (Qwen3-8B BF16 + `nvidia/Qwen3-8B-FP8`, plus the 3B bridge)
-- [ ] Community or Secure Cloud chosen; price checked; cap USD 15 accepted
-- [ ] Prerequisites in section 2 done
+- [x] Model choice confirmed (Qwen3-8B BF16 + `nvidia/Qwen3-8B-FP8`, plus the 3B bridge)
+- [x] Secure Cloud chosen (≈ USD 3.99/h → ≈ USD 12 for 3 h); cap USD 15 accepted
+- [x] Prerequisites in section 2 done (SGLang T4 smoke skipped)
 
-Approved by: __________ Date: __________
+Approved by: Charles Tran (in chat) · Date: 2026-11-19
