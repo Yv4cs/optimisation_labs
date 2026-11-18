@@ -3,7 +3,7 @@
 Each recipe answers a serving question: *for this goal, on this hardware, run this command, and expect these numbers.*
 The configs are the ones we measured, and the numbers come from `results/runs.jsonl`. The reasoning behind them is in `STORIES.md`.
 
-Status: **T4 recipes done** (2026-11-18). H100 recipes come after TN4.
+Status: T4 recipes R1–R6 (2026-11-18), H100 recipes R7–R9 (2026-11-19).
 
 ## How to read the numbers
 
@@ -39,6 +39,9 @@ To reproduce any row, run `make setup && make bench EXP=<config>`.
 | Maximum throughput or lowest energy per token, no latency target (batch, offline) | 1× or 2× T4 | **R4** |
 | Many users sharing a long system prompt (RAG, agents, chat products) | any | **R5** prefix caching |
 | Long, *different* prompts per user | any | **R6** (KV-cache limit) |
+| Highest throughput / lowest cost per token on H100 | 1× H100 | **R7** FP8, vLLM or SGLang |
+| Lowest single-user latency on H100 | 1× H100 | **R8** FP8, any engine |
+| Serving TensorRT-LLM above ~128 concurrent requests | 1× H100 | **R9** check CUDA graph sizes |
 
 ---
 
@@ -156,6 +159,68 @@ At c=256 half the users queued, TTFT p50 reached 152 s, and throughput fell to 2
 
 ---
 
+## H100 recipes (TN4: 1× H100 SXM 80 GB, Secure Cloud USD 3.99/h, 2026-11-18)
+
+Environment per engine (from each run's `env.json`): vLLM 0.33.0 + torch 2.14.0; SGLang 0.5.23 + torch 2.14.1;
+TensorRT-LLM 1.2.1 + torch 2.9.1+cu130 (plus `pyarrow<20`); Python 3.12.3, CUDA 13.0, driver 595.112.07.
+Models: `Qwen/Qwen3-8B` @ `b968826d9c46dd6066d109eabc6255188de91218` (BF16), `nvidia/Qwen3-8B-FP8` @
+`2cebc4c89e25abc17668c81b01dceaf3d8b914d5` (FP8 weights, activations and KV-cache, D-011). Same ShareGPT workload as T4.
+Latency per token is **TPOT** (per-request median), because ITL breaks above ~20k tok/s (S-016).
+
+**On H100 the T4 interactive SLO (TTFT p50 ≤ 1 s, per-token ≤ 50 ms) holds at every measured level up to c=256 on all
+three engines**, so it no longer picks the operating point. Throughput and cost per token do.
+
+### R7: Highest throughput and lowest cost per token: FP8, vLLM or SGLang, c=256
+
+```bash
+vllm serve nvidia/Qwen3-8B-FP8 --revision 2cebc4c89e25abc17668c81b01dceaf3d8b914d5 \
+  --tensor-parallel-size 1 --kv-cache-dtype fp8 --no-enable-prefix-caching --max-model-len 4096
+# or
+python -m sglang.launch_server --model-path nvidia/Qwen3-8B-FP8 --revision 2cebc4c89e25abc17668c81b01dceaf3d8b914d5 \
+  --tp-size 1 --kv-cache-dtype fp8_e4m3 --disable-radix-cache --context-length 4096
+```
+Configs: `h100_qwen3-8b_{vllm,sglang}_fp8.yaml`.
+
+| Setup at c=256 | tok/s | TTFT p50 / p99 | TPOT p50 | J/token | USD per 1M output tokens (at 3.99/h) |
+|---|---:|---:|---:|---:|---:|
+| vLLM FP8 | **16,432** | 0.69 / 1.21 s | 12.7 ms | **0.039** | **0.067** |
+| SGLang FP8 | 16,361 | 0.72 / 1.22 s | 12.7 ms | 0.039 | 0.068 |
+| vLLM BF16 | 12,398 | 0.96 / 1.66 s | 17.0 ms | 0.054 | 0.089 |
+| SGLang BF16 | 12,333 | 0.90 / 1.64 s | 17.2 ms | 0.055 | 0.090 |
+| TRT-LLM FP8 (defaults, see R9) | 8,530 | 0.58 / 1.40 s | 27.5 ms | 0.044 | 0.130 |
+| TRT-LLM BF16 (defaults, see R9) | 8,882 | 0.90 / 1.87 s | 25.3 ms | 0.064 | 0.125 |
+
+- FP8 is +33% throughput over BF16 at c=256 and +53% at c=1. Unlike INT4 on T4, it still helps when compute-bound,
+  because Hopper has FP8 tensor cores (S-017). Accuracy of FP8 vs BF16 was **not measured**.
+- vLLM and SGLang are within 0.6% at c=256. Pick on features and operations, not speed (S-017).
+- Each user still gets ~79 tok/s (12.7 ms per token) at 256 concurrent users. The H100 was still scaling at 256, so the
+  real ceiling is higher and unmeasured.
+- At c=256 BF16 runs at the 700 W power cap (clock 1,635–1,680 MHz); FP8 does the same work at ~671 W (S-019).
+
+### R8: Lowest single-user latency on H100: FP8, any engine
+
+| c=1 | tok/s | TPOT p50 | TTFT p50 | J/token |
+|---|---:|---:|---:|---:|
+| TRT-LLM FP8 | 222.1 | **4.36 ms** | 32 ms | 1.852 |
+| vLLM FP8 | **222.6** | 4.41 ms | **16 ms** | 1.866 |
+| SGLang FP8 | 214.6 | 4.59 ms | 15 ms | 1.899 |
+| vLLM BF16 | 145.8 | 6.78 ms | 18 ms | 3.117 |
+
+All FP8 engines are within 5%. TRT-LLM's first token took about twice as long at c=1 (30–32 vs 15–18 ms). Single-user
+serving is the most expensive way to use an H100: USD 4.98 per million tokens on vLLM FP8, 74× the c=256 cost.
+
+### R9: TensorRT-LLM above ~128 concurrent requests: size the CUDA graphs (untested)
+
+With defaults, TRT-LLM 1.2.1 matched vLLM up to c=64 and then fell to about half at c=256, with the GPU only 37% busy
+(S-018). Its log shows CUDA graphs captured for batch sizes 1–32, 64 and 128 only, with padding off. The suspected fix,
+**prepared but not run**, is to add to the `--extra_llm_api_options` YAML:
+```yaml
+cuda_graph_config:
+  max_batch_size: 256      # at least the decode batch you expect
+  enable_padding: true     # let in-between batch sizes use the next captured graph
+```
+Until that is measured, treat TRT-LLM's c=256 numbers as "defaults, untuned", not as its capability.
+
 ## Things that made results worse (don't)
 
 | Don't | Measured effect |
@@ -164,6 +229,8 @@ At c=256 half the users queued, TTFT p50 reached 152 s, and throughput fell to 2
 | `--no-enable-prefix-caching` when prompts share a prefix | 2× lower throughput, 16× higher TTFT p50 at c=256 (S-014) |
 | Quote batch-1 latency measured in another session or on another card | The same config gave 28.7–51.9 ms per token across sessions (S-007, S-013) |
 | Add a second GPU to cut energy per token | DP=2 at c=256: 0.095 J/token vs one card at c=256: 0.082 (R4) |
+| Run TRT-LLM 1.2.1 above batch 128 with default CUDA graph sizes | Half of vLLM's throughput at c=256, GPU 37% busy (R9, S-018) |
+| Read ITL from one Python client above ~20k tok/s | ITL p50 measured as 0.0 ms; use TPOT and the server's counters (S-016) |
 
 ## Not measured yet
 
@@ -171,4 +238,7 @@ At c=256 half the users queued, TTFT p50 reached 152 s, and throughput fell to 2
 - c=32 on two GPUs (R3 open point).
 - Long *unique* prompts with AWQ or TP=2 (R6).
 - Server-side `--max-num-seqs` as admission control.
-- **H100:** vLLM vs SGLang vs TensorRT-LLM, BF16 vs FP8 (TN4, `H100_CHECKLIST.md`). Recipes R7+ will be added from it.
+- Accuracy of FP8 against BF16 on H100.
+- TRT-LLM with `cuda_graph_config` sized for c=256 (R9).
+- H100 above c=256, and H100 with TP/DP or NVLink (one GPU only).
+- Per-engine lock files on H100: lost to a `pip freeze` mistake (S-005); versions are in each run's `env.json`.

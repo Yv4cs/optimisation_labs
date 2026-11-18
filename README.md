@@ -15,7 +15,8 @@ shown as "not measured".
 | FP16 vs AWQ-INT4 | 1× T4 | c=1: ~3.5× faster per token (same session), 74.2 tok/s; c=256: +2% (S-011) |
 | Prefix caching off vs on, 1,024-token shared prompt | 1× T4 | c=256: 215 → 443 tok/s, TTFT p50 152 → 9.4 s, 0.300 → 0.151 J/token (S-014) |
 | TP=2 vs 2 replicas | 2× T4 (PCIe) | TP wins c≤64 (c=1: 61.0 vs 27.0 tok/s); DP wins c=256 (1,376 vs 1,179 tok/s) (S-012) |
-| vLLM vs SGLang vs TensorRT-LLM, BF16 vs FP8 | 1× H100 | not measured |
+| vLLM vs SGLang vs TensorRT-LLM, BF16 vs FP8 (Qwen3-8B) | 1× H100 SXM | vLLM ≈ SGLang (±4%); FP8 +33–53%; best 16,432 tok/s, 0.039 J/token at c=256; TRT-LLM halves at c=256 with default CUDA graphs (S-017, S-018) |
+| Same T4 baseline on H100 (Qwen2.5-3B FP16) | 1× H100 SXM | 12× at c=16, 29× at c=256; 3× less energy per token (S-019) |
 
 ## Quickstart
 

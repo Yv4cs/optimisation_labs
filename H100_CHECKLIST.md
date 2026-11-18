@@ -62,15 +62,23 @@ sed -i 's/^pod_hourly_usd: 0.0.*/pod_hourly_usd: 3.99/' configs/experiments/h100
 
 # --- per engine (E = vllm | sglang | trtllm)
 uv venv /workspace/venv-$E --python 3.12 && source /workspace/venv-$E/bin/activate
-uv pip install "vllm==0.33.0" -e ".[dev]"            # sglang: "sglang==0.5.23"   trtllm: "tensorrt_llm==1.2.1"
+uv pip install "vllm==0.33.0" -e ".[dev]"            # sglang: "sglang==0.5.23"   trtllm: see below
 make env && make test
 tmux new -s $E                                       # benchmarks survive a closed browser tab
 make smoke EXP=configs/experiments/h100_qwen3-8b_${E}_bf16.yaml
 make bench EXP=configs/experiments/h100_qwen3-8b_${E}_bf16.yaml
 make bench EXP=configs/experiments/h100_qwen3-8b_${E}_fp8.yaml
 [ $E = vllm ] && make bench EXP=configs/experiments/h100_qwen3b_fp16_vllm.yaml
-pip freeze --exclude-editable > env/lock-h100-$E.txt
+uv pip freeze --python /workspace/venv-$E/bin/python > env/lock-h100-$E.txt   # NOT pip freeze: uv venvs have no pip (S-005)
+grep -iE "^(vllm|sglang|tensorrt.llm)==" env/lock-h100-$E.txt                   # must print the engine
 tar czf /workspace/results_h100.tar.gz results env  # re-run after every engine; download it each time
+```
+
+TensorRT-LLM needs two extras, found on the pod:
+```bash
+uv pip install "tensorrt_llm==1.2.1" "pyarrow<20" -e ".[dev]" \
+  --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match   # newest pyarrow needs NumPy 2; TRT-LLM pins 1.26
+export OMPI_ALLOW_RUN_AS_ROOT=1 OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1                                 # MPI refuses root by default
 ```
 
 Download `results_h100.tar.gz` after every engine block, through the pod's Jupyter file browser or `runpodctl send`.
@@ -104,3 +112,13 @@ Download `results_h100.tar.gz` after every engine block, through the pod's Jupyt
 - [x] Prerequisites in section 2 done (SGLang T4 smoke skipped)
 
 Approved by: Charles Tran (in chat) · Date: 2026-11-19
+
+## Outcome (2026-11-18)
+
+- H100 80GB HBM3 (SXM), driver 595.112.07, CUDA 13.2, 700 W limit. Secure Cloud, USD 3.99/h.
+- All 7 planned sweeps completed on the first try, plus one TRT-LLM diagnostic (`…_trtllm_fp8_pp8.yaml`). TRT-LLM came
+  up well inside its 30-minute time box. The CUDA-graph test for S-018 was prepared and skipped to save budget.
+- Time on the pod: about 16:45–19:15 UTC. Spend: ≈ USD 10 (check the Billing screenshot).
+- Problems hit: TRT-LLM import failed on pyarrow/NumPy versions (fixed with `pyarrow<20`); per-engine lock files
+  captured the system env because `pip` was not the venv's (files dropped, versions recovered from `env.json`); HF
+  weights download into `hub/blobs`, so `du` on a model folder shows only a few MB.
