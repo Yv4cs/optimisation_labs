@@ -111,14 +111,14 @@ Download `results_h100.tar.gz` after every engine block, through the pod's Jupyt
 - [x] Secure Cloud chosen (≈ USD 3.99/h → ≈ USD 12 for 3 h); cap USD 15 accepted
 - [x] Prerequisites in section 2 done (SGLang T4 smoke skipped)
 
-Approved by: Charles Tran (in chat) · Date: 2026-11-19
+Approved by: Charles Tran · Date: 2026-11-19
 
 ## Outcome (2026-11-18)
 
-- H100 80GB HBM3 (SXM), driver 595.112.07, CUDA 13.2, 700 W limit. Secure Cloud, USD 3.99/h.
+- H100 80GB HBM3 (SXM), driver 595.112.07, CUDA 13.2, 700 W limit. Secure Cloud, **USD 4.39/h compute** (USD 4.41/h with storage, from the console; the 3.99 planning price was wrong).
 - All 7 planned sweeps completed on the first try, plus one TRT-LLM diagnostic (`…_trtllm_fp8_pp8.yaml`). TRT-LLM came
   up well inside its 30-minute time box. The CUDA-graph test for S-018 was prepared and skipped to save budget.
-- Time on the pod: about 16:45–19:15 UTC. Spend: ≈ USD 10 (check the Billing screenshot).
+- Time on the pod: about 16:45–19:15 UTC. Spend: ≈ USD 11 in total, plus volume storage while the pod was stopped.
 - Problems hit: TRT-LLM import failed on pyarrow/NumPy versions (fixed with `pyarrow<20`); per-engine lock files
   captured the system env because `pip` was not the venv's (files dropped, versions recovered from `env.json`); HF
   weights download into `hub/blobs`, so `du` on a model folder shows only a few MB.

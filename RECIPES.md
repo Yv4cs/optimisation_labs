@@ -159,7 +159,7 @@ At c=256 half the users queued, TTFT p50 reached 152 s, and throughput fell to 2
 
 ---
 
-## H100 recipes (TN4: 1× H100 SXM 80 GB, Secure Cloud USD 3.99/h, 2026-11-18)
+## H100 recipes (TN4: 1× H100 SXM 80 GB, Secure Cloud USD 4.39/h compute, 2026-11-18)
 
 Environment per engine (from each run's `env.json`): vLLM 0.33.0 + torch 2.14.0; SGLang 0.5.23 + torch 2.14.1;
 TensorRT-LLM 1.2.1 + torch 2.9.1+cu130 (plus `pyarrow<20`); Python 3.12.3, CUDA 13.0, driver 595.112.07.
@@ -181,14 +181,14 @@ python -m sglang.launch_server --model-path nvidia/Qwen3-8B-FP8 --revision 2cebc
 ```
 Configs: `h100_qwen3-8b_{vllm,sglang}_fp8.yaml`.
 
-| Setup at c=256 | tok/s | TTFT p50 / p99 | TPOT p50 | J/token | USD per 1M output tokens (at 3.99/h) |
+| Setup at c=256 | tok/s | TTFT p50 / p99 | TPOT p50 | J/token | USD per 1M output tokens (at 4.39/h) |
 |---|---:|---:|---:|---:|---:|
-| vLLM FP8 | **16,432** | 0.69 / 1.21 s | 12.7 ms | **0.039** | **0.067** |
-| SGLang FP8 | 16,361 | 0.72 / 1.22 s | 12.7 ms | 0.039 | 0.068 |
-| vLLM BF16 | 12,398 | 0.96 / 1.66 s | 17.0 ms | 0.054 | 0.089 |
-| SGLang BF16 | 12,333 | 0.90 / 1.64 s | 17.2 ms | 0.055 | 0.090 |
-| TRT-LLM FP8 (defaults, see R9) | 8,530 | 0.58 / 1.40 s | 27.5 ms | 0.044 | 0.130 |
-| TRT-LLM BF16 (defaults, see R9) | 8,882 | 0.90 / 1.87 s | 25.3 ms | 0.064 | 0.125 |
+| vLLM FP8 | **16,432** | 0.69 / 1.21 s | 12.7 ms | **0.039** | **0.074** |
+| SGLang FP8 | 16,361 | 0.72 / 1.22 s | 12.7 ms | 0.039 | 0.075 |
+| vLLM BF16 | 12,398 | 0.96 / 1.66 s | 17.0 ms | 0.054 | 0.098 |
+| SGLang BF16 | 12,333 | 0.90 / 1.64 s | 17.2 ms | 0.055 | 0.099 |
+| TRT-LLM FP8 (defaults, see R9) | 8,530 | 0.58 / 1.40 s | 27.5 ms | 0.044 | 0.143 |
+| TRT-LLM BF16 (defaults, see R9) | 8,882 | 0.90 / 1.87 s | 25.3 ms | 0.064 | 0.137 |
 
 - FP8 is +33% throughput over BF16 at c=256 and +53% at c=1. Unlike INT4 on T4, it still helps when compute-bound,
   because Hopper has FP8 tensor cores (S-017). Accuracy of FP8 vs BF16 was **not measured**.
@@ -207,7 +207,7 @@ Configs: `h100_qwen3-8b_{vllm,sglang}_fp8.yaml`.
 | vLLM BF16 | 145.8 | 6.78 ms | 18 ms | 3.117 |
 
 All FP8 engines are within 5%. TRT-LLM's first token took about twice as long at c=1 (30–32 vs 15–18 ms). Single-user
-serving is the most expensive way to use an H100: USD 4.98 per million tokens on vLLM FP8, 74× the c=256 cost.
+serving is the most expensive way to use an H100: USD 5.48 per million tokens on vLLM FP8, 74× the c=256 cost.
 
 ### R9: TensorRT-LLM above ~128 concurrent requests: size the CUDA graphs (untested)
 
