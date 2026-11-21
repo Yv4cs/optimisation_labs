@@ -1,4 +1,4 @@
-# STORIES S-018 diagnostic: TRT-LLM FP8 at c=256 with 8 postprocess (detokenize) workers instead of 0.
+# Diagnostic for docs/findings.md F4: TRT-LLM FP8 at c=256 with 8 postprocess (detokenize) workers instead of 0.
 # Result: no change (8,561 vs 8,530 tok/s), so the Python postprocessing path is not the bottleneck.
 name: h100-qwen3-8b-trtllm-fp8-pp8
 milestone: M4
@@ -11,7 +11,7 @@ max_model_len: 4096
 prefix_caching: false
 extra_server_args: ["--num_postprocess_workers", "8"]
 interconnect: SXM  # H100 SXM5; change to PCIe if the pod is an H100 PCIe
-pod_hourly_usd: 0.0  # TODO on the pod: the hourly price shown by RunPod
+pod_hourly_usd: 4.39  # RunPod Secure Cloud price shown on the pod (the recorded runs used 3.99, see docs/findings.md F9)
 
 concurrency: [256]
 dataset:

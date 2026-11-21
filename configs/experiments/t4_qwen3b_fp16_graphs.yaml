@@ -1,4 +1,4 @@
-# STORIES S-007 control: the eager config with CUDA graphs and compile left on (the TN1 setting).
+# Batch-1 latency control (docs/findings.md F9): the eager config with CUDA graphs and compile left on (the baseline setting).
 # Run it in the same Kaggle session as the eager config, so both land on the same physical GPU.
 name: t4-qwen2.5-3b-fp16-vllm-graphs
 milestone: M1

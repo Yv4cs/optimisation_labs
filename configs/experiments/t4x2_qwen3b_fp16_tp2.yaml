@@ -1,5 +1,5 @@
-# TN3: 2x T4 over PCIe, one model split across both GPUs (tensor parallel, all-reduce over PCIe).
-# Same total GPUs and same concurrency (total across replicas) for both layouts; compare with TN1 (1x T4).
+# 2x T4 over PCIe, one model split across both GPUs (tensor parallel, all-reduce over PCIe).
+# Same total GPUs and same concurrency (total across replicas) for both layouts; compare with the 1x T4 baseline.
 # Expectation ("less is more"): the 3B model fits on one T4, so replicas avoid all-reduce and should win on
 # throughput; TP=2 may win single-user ITL because each GPU reads half the weights, if PCIe all-reduce is cheap.
 name: t4x2-qwen2.5-3b-fp16-vllm-tp2

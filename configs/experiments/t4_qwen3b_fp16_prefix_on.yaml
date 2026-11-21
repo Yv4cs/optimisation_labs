@@ -1,4 +1,4 @@
-# TN2b: every request = the same 1024-token "system prompt" + a unique ShareGPT question.
+# Every request = the same 1024-token "system prompt" + a unique ShareGPT question.
 # Run once with prefix caching off and once on; the workload is identical, only the flag changes.
 # Expectation: with caching, TTFT drops (the shared prefix is prefilled once) and the shared KV blocks
 # leave room for more concurrent users.

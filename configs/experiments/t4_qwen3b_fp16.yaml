@@ -1,4 +1,4 @@
-# M1 baseline: one T4, FP16, no prefix caching, realistic chat prompts.
+# Baseline: one T4, FP16, no prefix caching, realistic chat prompts.
 name: t4-qwen2.5-3b-fp16-vllm
 milestone: M1
 runtime: vllm

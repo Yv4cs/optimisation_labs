@@ -15,7 +15,7 @@ import yaml
 from .config import Experiment
 
 # Quantized checkpoints (AWQ, ModelOpt FP8) carry their quantization config and every runtime reads it, so
-# no --quantization flag (D-010, D-011). "fp8" also stores the KV-cache in FP8 on every runtime: the ModelOpt
+# no --quantization flag (docs/methodology.md D-010, D-011). "fp8" also stores the KV-cache in FP8 on every runtime: the ModelOpt
 # checkpoint ships KV scales, and leaving it to each engine's default would make the KV dtype differ by engine.
 _PRECISION_ARGS = {
     "vllm": {

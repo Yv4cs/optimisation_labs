@@ -18,7 +18,7 @@ class Sample:
     power_w: float
     util_pct: float
     mem_used_gb: float  # GB = 1e9 bytes
-    # Clock state, because cloud GPUs throttle and the clocks cannot be locked there (STORIES S-001).
+    # Clock state, because cloud GPUs throttle and the clocks cannot be locked there (docs/findings.md F9).
     sm_clock_mhz: float = 0.0
     temp_c: float = 0.0
     clock_event_reasons: int = 0  # NVML bitmask, e.g. 0x4 SW power cap, 0x20 SW thermal, 0x40 HW thermal

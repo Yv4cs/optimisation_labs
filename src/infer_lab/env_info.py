@@ -30,7 +30,7 @@ def gpu_info() -> dict[str, str | int | list[str]]:
     try:
         count = pynvml.nvmlDeviceGetCount()
         name = pynvml.nvmlDeviceGetName(pynvml.nvmlDeviceGetHandleByIndex(0)) if count else "none"
-        # Identifies the physical card, so runs from different sessions can be matched (STORIES S-013).
+        # Identifies the physical card, so runs from different sessions can be matched (docs/findings.md F9).
         uuids = [_str(pynvml.nvmlDeviceGetUUID(pynvml.nvmlDeviceGetHandleByIndex(i))) for i in range(count)]
         driver = pynvml.nvmlSystemGetDriverVersion()
         cuda = pynvml.nvmlSystemGetCudaDriverVersion()  # e.g. 12040 -> "12.4"

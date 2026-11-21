@@ -32,7 +32,7 @@ def ttft_ms(r: RequestResult) -> float:
 def itl_ms(r: RequestResult) -> list[float]:
     """Gaps between consecutive chunks in ms (n chunks -> n-1 gaps).
 
-    If a runtime packs several tokens into one chunk this is per-chunk, not per-token (DECISIONS D-008).
+    If a runtime packs several tokens into one chunk this is per-chunk, not per-token (docs/methodology.md D-008).
     """
     t = r.chunk_times_s
     return [(b - a) * 1000 for a, b in zip(t, t[1:])]

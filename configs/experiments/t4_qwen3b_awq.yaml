@@ -1,11 +1,11 @@
-# TN2a: same workload as TN1, weights in AWQ INT4 (4-bit weights, FP16 activations).
+# Same workload as the FP16 baseline, weights in AWQ INT4 (4-bit weights, FP16 activations).
 # Expectation: decode reads ~4x fewer weight bytes, so low-concurrency ITL should drop; at high concurrency
-# the dequantisation work can eat the gain. Compare with TN1 at the same levels.
+# the dequantisation work can eat the gain. Compare with the FP16 baseline at the same levels.
 name: t4-qwen2.5-3b-awq-vllm
 milestone: M2
 runtime: vllm
 model: Qwen/Qwen2.5-3B-Instruct-AWQ
-precision: awq-int4  # the runtime reads the checkpoint's quantization config and picks the kernel (D-010)
+precision: awq-int4  # the runtime reads the checkpoint's quantization config and picks the kernel (docs/methodology.md D-010)
 tp: 1
 dp: 1
 max_model_len: 4096
@@ -13,7 +13,7 @@ prefix_caching: false
 interconnect: PCIe
 pod_hourly_usd: 0.0
 
-concurrency: [1, 4, 16, 64, 256]  # TN1's levels minus the in-between ones, to fit a Kaggle session
+concurrency: [1, 4, 16, 64, 256]  # the baseline's levels minus the in-between ones, to fit a Kaggle session
 dataset:
   kind: sharegpt
   output_len: 256

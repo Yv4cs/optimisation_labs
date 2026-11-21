@@ -1,6 +1,7 @@
-# Design decisions
+# Methodology
 
-Each entry: the choice, why, and what would make us revisit it.
+How the benchmarks are run and why. Each entry records a choice and the reason for it. Results are in
+[findings.md](findings.md).
 
 ## D-001 Environment pinning without Docker on Kaggle
 Kaggle notebooks cannot run Docker. On Kaggle we install from `requirements-kaggle.txt`, verify the
@@ -70,4 +71,16 @@ dtype is set explicitly to FP8 on every engine (vLLM `--kv-cache-dtype fp8`, SGL
 weights, activations and KV-cache; the BF16 runs keep a BF16 KV-cache.
 TensorRT-LLM's prefix caching is KV block reuse, which is on by default; `prefix_caching: false` turns it off
 through `--extra_llm_api_options`, as for the other engines. Other engine defaults (memory fraction, CUDA graph
-batch sizes, scheduler) stay as shipped and are read from each server log (S-002).
+batch sizes, scheduler) stay as shipped and are read from each server log ([findings F9](findings.md#f9)).
+
+## D-012 Load generator
+A semaphore keeps exactly `concurrency` requests in flight, so the server sees a steady number of users
+instead of one burst. The arrival time of each streamed chunk is recorded before the JSON is parsed, so client
+work is not counted as server latency. A stream with no text or no usage chunk counts as a failure rather than
+a fast zero-token success. If no request succeeds, every metric is `None` ("not measured"), never 0.
+
+## D-013 TPOT for latency per token above ~20k tok/s
+At H100 throughput one Python client reading 256 streams falls behind and reads chunks in bursts, so the gap
+between chunks (ITL, D-008) can read as 0 ms. H100 results therefore report TPOT = (end − first chunk) ÷
+(output tokens − 1) per request, taking the median, which does not depend on when each chunk was read.
+Throughput is cross-checked against the server's own counters ([findings F9](findings.md#f9)).

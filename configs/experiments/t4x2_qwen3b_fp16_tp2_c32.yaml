@@ -1,4 +1,4 @@
-# RECIPES R3 open point: c=32 on two GPUs, between the measured c=16 and c=64. Same experiment
+# docs/recipes.md R3 open point: c=32 on two GPUs, between the measured c=16 and c=64. Same experiment
 # name as the full sweep, so the level slots into that curve.
 name: t4x2-qwen2.5-3b-fp16-vllm-tp2
 milestone: M3

@@ -1,24 +1,63 @@
 # LLM Inference Optimisation Lab
 
-Reproducible benchmarks of LLM serving: vLLM, SGLang and TensorRT-LLM; FP16/BF16 vs FP8 vs INT4;
-tensor-parallel vs replicated layouts. Reports TTFT, inter-token latency, throughput and **energy per
-token**, measured with NVML.
+A benchmark harness, and the measurements made with it, showing how serving choices change the throughput,
+latency, cost and energy of LLM inference. The choices covered are batch size, precision, serving engine, prefix
+caching and multi-GPU layout. Measurements were made on one NVIDIA H100 SXM (vLLM, SGLang and TensorRT-LLM
+serving Qwen3-8B) and on NVIDIA T4s.
 
-Every number in this repo traces back to a line in `results/runs.jsonl`. Anything not yet measured is
-shown as "not measured".
+Every number here traces back to a record in `results/runs.jsonl` and the raw per-request and power files
+in `results/raw/`. Anything not measured is labelled "not measured".
 
-## Status
+## Headline results (1× H100 SXM, Qwen3-8B)
 
-| Experiment | GPU | Result |
+| Setup | Throughput | Cost per 1M output tokens | Energy per token |
+|---|---:|---:|---:|
+| vLLM, BF16, 1 request at a time | 146 tok/s | USD 8.36 | 3.12 J |
+| vLLM, BF16, 256 concurrent requests | 12,398 tok/s | USD 0.098 | 0.054 J |
+| vLLM, FP8, 256 concurrent requests | 16,432 tok/s | USD 0.074 | 0.0395 J |
+
+On the same GPU, batching and FP8 together cut the cost per token **113×** (85× from batching, 1.33× from FP8).
+Cost assumes USD 4.39/h (RunPod Secure Cloud) with the GPU busy for the whole hour.
+
+## Findings
+
+| Finding | Evidence |
+|---|---|
+| [Batching is the biggest lever](docs/findings.md#f1): 74× throughput and 47× less energy per token from 1 to 256 requests, while power rose only 1.6× | H100, T4 |
+| [FP8 adds 33–53% on H100](docs/findings.md#f2) at every load; AWQ-INT4 on T4 helps a single user (~3.5×) but not a full GPU (+2%) | H100, T4 |
+| [vLLM and SGLang are within about 0.5%](docs/findings.md#f3) at 256 requests; precision and batch size matter far more than the engine | H100 |
+| [TensorRT-LLM 1.2.1 halves at 256 requests](docs/findings.md#f4) with default settings: CUDA graphs are captured only up to batch 128, and the GPU is busy 43% of the time | H100 |
+| [Prefix caching doubles throughput](docs/findings.md#f5) with a shared 1,024-token prompt: TTFT p50 152 s → 9.4 s, energy per token halved | T4 |
+| [KV-cache becomes the limit only with long prompts](docs/findings.md#f6): 44% full with short chat prompts at 256 requests, 94–98% with long ones | T4 |
+| [Tensor parallel beats replicas until the GPU is compute-bound](docs/findings.md#f7): 2.3× faster for one user, 17% slower at 256 requests | 2× T4 |
+| [The H100 is 12–29× faster than a T4 but only 3× more energy-efficient](docs/findings.md#f8); both run at their power cap under full load | T4, H100 |
+
+## What is measured
+
+- **Workload:** ShareGPT prompts, exactly 256 output tokens per request (`temperature=0`, `ignore_eos`), sent at a
+  fixed number of concurrent requests (1 to 256). Warm-up requests are excluded.
+- **Throughput:** output tokens per second over the whole run.
+- **Latency:** time to first token (TTFT, p50 and p99) and time per output token (ITL, or TPOT on H100).
+- **Energy:** GPU power from NVML sampled every 100 ms, integrated over the run and divided by output tokens.
+  It is cross-checked against NVML's own energy counter (median difference −0.8% over 90 H100 runs).
+- **Hardware state:** GPU utilisation, SM clock, temperature and throttle reasons with every power sample.
+- **Repeatability:** 3 repeats per level with fresh prompts. A level is rerun if the repeats differ by more
+  than 5% (coefficient of variation).
+
+Details and the reasons behind each choice are in [docs/methodology.md](docs/methodology.md).
+
+## Environment
+
+| | H100 runs | T4 runs |
 |---|---|---|
-| vLLM FP16 baseline, concurrency 1→256 | 1× T4 | 18.9 → 792 tok/s; 3.46 → 0.082 J/token (STORIES S-006) |
-| FP16 vs AWQ-INT4 | 1× T4 | c=1: ~3.5× faster per token (same session), 74.2 tok/s; c=256: +2% (S-011) |
-| Prefix caching off vs on, 1,024-token shared prompt | 1× T4 | c=256: 215 → 443 tok/s, TTFT p50 152 → 9.4 s, 0.300 → 0.151 J/token (S-014) |
-| TP=2 vs 2 replicas | 2× T4 (PCIe) | TP wins c≤64 (c=1: 61.0 vs 27.0 tok/s); DP wins c=256 (1,376 vs 1,179 tok/s) (S-012) |
-| vLLM vs SGLang vs TensorRT-LLM, BF16 vs FP8 (Qwen3-8B) | 1× H100 SXM | vLLM ≈ SGLang (±4%); FP8 +33–53%; best 16,432 tok/s, 0.039 J/token at c=256; TRT-LLM halves at c=256 with default CUDA graphs (S-017, S-018) |
-| Same T4 baseline on H100 (Qwen2.5-3B FP16) | 1× H100 SXM | 12× at c=16, 29× at c=256; 3× less energy per token (S-019) |
+| GPU | 1× H100 SXM 80 GB (RunPod) | 1× or 2× Tesla T4 16 GB, PCIe (Kaggle) |
+| Driver / CUDA | 595.112.07 / 13.0 | 580.178.04 / 13.0 |
+| Engines | vLLM 0.33.0, SGLang 0.5.23, TensorRT-LLM 1.2.1 | vLLM 0.33.0 |
+| Models | `Qwen/Qwen3-8B` (BF16), `nvidia/Qwen3-8B-FP8`, `Qwen/Qwen2.5-3B-Instruct` (FP16) | `Qwen/Qwen2.5-3B-Instruct` (FP16 and AWQ-INT4) |
 
-## Quickstart
+Model revisions and exact commands are in [docs/recipes.md](docs/recipes.md).
+
+## Reproduce
 
 ```bash
 make setup                                              # on a GPU box (Kaggle T4 or RunPod)
@@ -30,11 +69,20 @@ make bench EXP=configs/experiments/t4_qwen3b_fp16.yaml  # full sweep → results
 
 On Kaggle, `notebooks/kaggle_driver.ipynb` runs the same make targets.
 
-## Layout
+## Repository layout
 
 - `src/infer_lab/`: server launcher, load generator, metrics, NVML power sampler, run schema
 - `configs/experiments/`: one YAML file per experiment
-- `results/runs.jsonl`: one validated record per measured run; `results/raw/` holds per-request and power CSVs
-- `RECIPES.md`: which config to run for which goal, with the exact command and measured numbers
-- `DECISIONS.md`: why things are the way they are
-- `STORIES.md`: findings worth telling (surprise, evidence, reasoning, outcome)
+- `results/runs.jsonl`: one record per measured run; `results/raw/` holds per-request and power CSVs
+- `docs/findings.md`: what the measurements showed, with evidence
+- `docs/recipes.md`: which configuration to run for which goal, with commands and expected numbers
+- `docs/methodology.md`: how and why things are measured the way they are
+- `tests/`: unit tests for the load generator, metrics and power integration
+
+## Limitations
+
+- One H100 in one session; multi-GPU results are on T4s over PCIe only.
+- Output quality was not measured for FP8 or INT4. Check accuracy before relying on either.
+- The TensorRT-LLM CUDA-graph fix is prepared but not yet measured.
+- Energy covers the GPU board only, not the host, power supply losses or cooling.
+- A single-process load generator limits latency resolution above about 20,000 tok/s.

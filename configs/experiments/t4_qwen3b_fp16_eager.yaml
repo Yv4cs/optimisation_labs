@@ -1,5 +1,5 @@
-# STORIES S-007 check: is batch 1 slower per token than batch 2 because of CUDA graphs / torch.compile?
-# Same as TN1 but --enforce-eager (no graphs, no compile). Compare ITL at c=1 vs c=2 with TN1.
+# Batch-1 latency check (docs/findings.md F9): is batch 1 slower per token than batch 2 because of CUDA graphs / torch.compile?
+# Same as the FP16 baseline but --enforce-eager (no graphs, no compile). Compare ITL at c=1 vs c=2 with the baseline.
 name: t4-qwen2.5-3b-fp16-vllm-eager
 milestone: M1
 runtime: vllm
